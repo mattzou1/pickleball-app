@@ -117,7 +117,7 @@ def correlate_fault(
         return None
 
     return {
-        "side": zone_hit["side"],
+        "zone": zone_hit["zone"],
         "keypoint_side": zone_hit["keypoint_side"],
         "pixel": zone_hit["pixel"],
         "court_coord": zone_hit["court_coord"],

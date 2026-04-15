@@ -105,7 +105,7 @@ def test_correlate_below_consecutive():
 def test_correlate_fault_full():
     """Full fault correlation produces correct output."""
     zone_hit = {
-        "side": "near",
+        "zone": "left",
         "keypoint_side": "left",
         "pixel": (300, 400),
         "court_coord": (10.0, 3.0),
@@ -123,14 +123,14 @@ def test_correlate_fault_full():
     assert result is not None
     assert result["confidence_tier"] == "AUTO_FAULT"
     assert result["composite_confidence"] == pytest.approx(0.855)
-    assert result["side"] == "near"
+    assert result["zone"] == "left"
     assert result["ball_state"] == "LIVE"
 
 
 def test_correlate_fault_filtered():
     """Low confidence -> FILTERED -> returns None."""
     zone_hit = {
-        "side": "near",
+        "zone": "left",
         "keypoint_side": "left",
         "pixel": (300, 400),
         "court_coord": (10.0, 3.0),
@@ -152,7 +152,7 @@ def test_correlate_fault_filtered():
 def test_correlate_fault_bounced_no_fault():
     """BOUNCED state -> no fault regardless of confidence."""
     zone_hit = {
-        "side": "near",
+        "zone": "left",
         "keypoint_side": "left",
         "pixel": (300, 400),
         "court_coord": (10.0, 3.0),

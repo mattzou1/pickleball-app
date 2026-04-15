@@ -13,11 +13,11 @@ from pickleball.constants import (
     ANKLE_CONF_THRESHOLD,
     COCO_LEFT_ANKLE,
     COCO_RIGHT_ANKLE,
-    FAR_KITCHEN_Y_MAX,
-    FAR_KITCHEN_Y_MIN,
+    LEFT_KITCHEN_Y_MAX,
+    LEFT_KITCHEN_Y_MIN,
     FOOT_KP_CONF_THRESHOLD,
-    NEAR_KITCHEN_Y_MAX,
-    NEAR_KITCHEN_Y_MIN,
+    RIGHT_KITCHEN_Y_MAX,
+    RIGHT_KITCHEN_Y_MIN,
     WHOLEBODY_FOOT_INDICES,
     WORLD_CORNERS,
 )
@@ -64,14 +64,14 @@ def check_kitchen(court_x: float, court_y: float, buffer: float = 0.0) -> str | 
         buffer: expand zone boundaries by this many feet (for ankle fallback).
 
     Returns:
-        "near" if in near kitchen, "far" if in far kitchen, None if outside both.
+        "left" if in left kitchen, "right" if in right kitchen, None if outside both.
     """
-    if (NEAR_KITCHEN_Y_MIN - buffer) <= court_y <= (NEAR_KITCHEN_Y_MAX + buffer):
+    if (LEFT_KITCHEN_Y_MIN - buffer) <= court_y <= (LEFT_KITCHEN_Y_MAX + buffer):
         if -buffer <= court_x <= (20.0 + buffer):
-            return "near"
-    if (FAR_KITCHEN_Y_MIN - buffer) <= court_y <= (FAR_KITCHEN_Y_MAX + buffer):
+            return "left"
+    if (RIGHT_KITCHEN_Y_MIN - buffer) <= court_y <= (RIGHT_KITCHEN_Y_MAX + buffer):
         if -buffer <= court_x <= (20.0 + buffer):
-            return "far"
+            return "right"
     return None
 
 
@@ -141,8 +141,8 @@ def check_player_in_kitchen(
 
     Returns:
         List of zone hits, each a dict with:
-            side: "near" or "far"
-            keypoint_side: "left" or "right"
+            zone: "left" or "right" (kitchen zone)
+            keypoint_side: "left" or "right" (body side — which foot)
             pixel: (x, y)
             court_coord: (x_ft, y_ft)
             conf: keypoint confidence
@@ -158,7 +158,7 @@ def check_player_in_kitchen(
             zone = check_kitchen(court_x, court_y, buffer=0.0)
             if zone:
                 hits.append({
-                    "side": zone,
+                    "zone": zone,
                     "keypoint_side": kp["side"],
                     "pixel": (kp["x"], kp["y"]),
                     "court_coord": (court_x, court_y),
@@ -172,7 +172,7 @@ def check_player_in_kitchen(
             zone = check_kitchen(court_x, court_y, buffer=ANKLE_BUFFER_FT)
             if zone:
                 hits.append({
-                    "side": zone,
+                    "zone": zone,
                     "keypoint_side": kp["side"],
                     "pixel": (kp["x"], kp["y"]),
                     "court_coord": (court_x, court_y),

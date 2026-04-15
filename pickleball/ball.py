@@ -179,7 +179,7 @@ def classify_bounce_side(
         net_y_court: y-coordinate of the net in court coords (default: midpoint).
 
     Returns:
-        "near" if bounce on near side, "far" if on far side, None if unknown.
+        "left" if bounce on left side, "right" if on right side, None if unknown.
     """
     det = detections[frame_idx]
     if det is None:
@@ -190,59 +190,59 @@ def classify_bounce_side(
         return None
 
     if court_y < net_y_court:
-        return "near"
+        return "left"
     else:
-        return "far"
+        return "right"
 
 
 class BallStateMachine:
     """Per-side ball state machine tracking LIVE/BOUNCED/UNKNOWN.
 
     States:
-        near_state: state for the near side
-        far_state: state for the far side
+        left_state: state for the left side
+        right_state: state for the right side
 
     Transitions:
-        Bounce on near → near=BOUNCED, far=LIVE
-        Bounce on far → far=BOUNCED, near=LIVE
-        Ball crosses net heading near → near=LIVE
-        Ball crosses net heading far → far=LIVE
+        Bounce on left → left=BOUNCED, right=LIVE
+        Bounce on right → right=BOUNCED, left=LIVE
+        Ball crosses net heading left → left=LIVE
+        Ball crosses net heading right → right=LIVE
         Ball undetected >N frames → both=UNKNOWN
     """
 
     def __init__(self, unknown_gap_frames: int = BALL_UNKNOWN_GAP_FRAMES):
-        self.near_state = LIVE
-        self.far_state = LIVE
+        self.left_state = LIVE
+        self.right_state = LIVE
         self.unknown_gap_frames = unknown_gap_frames
         self.frames_without_detection = 0
         self._prev_side: str | None = None  # track which side ball was last on
 
     def update_bounce(self, side: str) -> None:
         """Record a bounce on the given side."""
-        if side == "near":
-            self.near_state = BOUNCED
-            self.far_state = LIVE
-        elif side == "far":
-            self.far_state = BOUNCED
-            self.near_state = LIVE
+        if side == "left":
+            self.left_state = BOUNCED
+            self.right_state = LIVE
+        elif side == "right":
+            self.right_state = BOUNCED
+            self.left_state = LIVE
 
     def update_net_crossing(self, heading_toward: str) -> None:
         """Record ball crossing the net.
 
         Args:
-            heading_toward: "near" or "far" indicating destination side.
+            heading_toward: "left" or "right" indicating destination side.
         """
-        if heading_toward == "near":
-            self.near_state = LIVE
-        elif heading_toward == "far":
-            self.far_state = LIVE
+        if heading_toward == "left":
+            self.left_state = LIVE
+        elif heading_toward == "right":
+            self.right_state = LIVE
 
     def update_detection(self, detected: bool, ball_side: str | None = None, net_x_pixel: float | None = None, ball_x_pixel: float | None = None) -> None:
         """Update state based on whether ball was detected this frame.
 
         Args:
             detected: True if ball was detected.
-            ball_side: "near" or "far" based on ball court position.
+            ball_side: "left" or "right" based on ball court position.
             net_x_pixel: x-pixel of the net center (for crossing detection).
             ball_x_pixel: x-pixel of the ball (for crossing detection).
         """
@@ -257,13 +257,13 @@ class BallStateMachine:
         else:
             self.frames_without_detection += 1
             if self.frames_without_detection > self.unknown_gap_frames:
-                self.near_state = UNKNOWN
-                self.far_state = UNKNOWN
+                self.left_state = UNKNOWN
+                self.right_state = UNKNOWN
 
     def get_state(self, side: str) -> str:
         """Get current state for the given side."""
-        if side == "near":
-            return self.near_state
-        elif side == "far":
-            return self.far_state
+        if side == "left":
+            return self.left_state
+        elif side == "right":
+            return self.right_state
         return UNKNOWN

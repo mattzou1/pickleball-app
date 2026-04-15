@@ -54,7 +54,7 @@ def make_keypoints(num_kp=17, overrides=None):
 
 def test_transform_to_court_known_point(sample_homography):
     """Verify homography maps a known pixel to expected court coord."""
-    # Pixel (100, 50) should map to court (0, 0) - near-left baseline
+    # Pixel (100, 50) should map to court (0, 0) - left baseline corner
     cx, cy = transform_to_court((100, 50), sample_homography)
     assert abs(cx - 0.0) < 0.1
     assert abs(cy - 0.0) < 0.1
@@ -70,24 +70,24 @@ def test_transform_to_court_far_corner(sample_homography):
 
 # ── Zone check tests ────────────────────────────────────────────────────────
 
-def test_check_kitchen_near():
-    """Court coord (10, 3) is in near kitchen."""
-    assert check_kitchen(10.0, 3.0) == "near"
+def test_check_kitchen_left():
+    """Court coord (10, 3) is in left kitchen."""
+    assert check_kitchen(10.0, 3.0) == "left"
 
 
-def test_check_kitchen_far():
-    """Court coord (10, 23) is in far kitchen."""
-    assert check_kitchen(10.0, 23.0) == "far"
+def test_check_kitchen_right():
+    """Court coord (10, 23) is in right kitchen."""
+    assert check_kitchen(10.0, 23.0) == "right"
 
 
 def test_check_kitchen_boundary():
-    """Court coord (10, 7) is ON the near kitchen line (fault)."""
-    assert check_kitchen(10.0, 7.0) == "near"
+    """Court coord (10, 7) is ON the left kitchen line (fault)."""
+    assert check_kitchen(10.0, 7.0) == "left"
 
 
-def test_check_kitchen_far_boundary():
-    """Court coord (10, 20) is ON the far kitchen line (fault)."""
-    assert check_kitchen(10.0, 20.0) == "far"
+def test_check_kitchen_right_boundary():
+    """Court coord (10, 20) is ON the right kitchen line (fault)."""
+    assert check_kitchen(10.0, 20.0) == "right"
 
 
 def test_check_outside_kitchen():
@@ -98,7 +98,7 @@ def test_check_outside_kitchen():
 def test_check_kitchen_with_buffer():
     """Buffer expands zone: (10, 7.4) is outside, but within 0.5 buffer."""
     assert check_kitchen(10.0, 7.4) is None
-    assert check_kitchen(10.0, 7.4, buffer=0.5) == "near"
+    assert check_kitchen(10.0, 7.4, buffer=0.5) == "left"
 
 
 # ── Model detection tests ───────────────────────────────────────────────────
@@ -178,13 +178,13 @@ def test_ankle_above_threshold_extracted():
 def test_any_foot_kp_in_zone_triggers_fault(identity_homography):
     """Big toe in zone but heel outside -> fault (ANY triggers)."""
     overrides = {
-        17: (10, 3, 0.5),   # left big toe IN near kitchen
+        17: (10, 3, 0.5),   # left big toe IN left kitchen
         19: (10, 10, 0.5),  # left heel OUTSIDE kitchen
     }
     kps = make_keypoints(23, overrides)
     hits = check_player_in_kitchen(kps, identity_homography)
     assert len(hits) >= 1
-    assert any(h["side"] == "near" for h in hits)
+    assert any(h["zone"] == "left" for h in hits)
 
 
 def test_all_foot_kps_outside_no_fault(identity_homography):

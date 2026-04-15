@@ -5,32 +5,32 @@ Tuning is a one-file change.
 """
 
 # ── Court dimensions (feet) ──────────────────────────────────────────────────
-# Coordinate system: origin at near-left corner of near-side kitchen
-# x-axis along baseline (0-20 ft), y-axis toward far baseline (0-27 ft)
+# Coordinate system: origin at left-side baseline corner
+# x-axis along baseline (0-20 ft), y-axis toward right-side baseline (0-27 ft)
 COURT_WIDTH_FT = 20.0
-COURT_LENGTH_FT = 27.0  # near baseline to far baseline (kitchen to kitchen)
+COURT_LENGTH_FT = 27.0  # left baseline to right baseline (kitchen to kitchen)
 KITCHEN_DEPTH_FT = 7.0
 
 # Kitchen zone boundaries in court coordinates
-NEAR_KITCHEN_Y_MIN = 0.0
-NEAR_KITCHEN_Y_MAX = 7.0
-FAR_KITCHEN_Y_MIN = 20.0
-FAR_KITCHEN_Y_MAX = 27.0
+LEFT_KITCHEN_Y_MIN = 0.0
+LEFT_KITCHEN_Y_MAX = 7.0
+RIGHT_KITCHEN_Y_MIN = 20.0
+RIGHT_KITCHEN_Y_MAX = 27.0
 
 # World coordinates for the 8 calibration corners (feet)
-# Order: near kitchen (BL, BR, TR, TL), far kitchen (BL, BR, TR, TL)
-# "Bottom" = closer to near baseline, "Top" = closer to net
+# Order: left kitchen (BL, BR, TR, TL), right kitchen (BL, BR, TR, TL)
+# "Bottom" = closer to left baseline, "Top" = closer to net
 WORLD_CORNERS = [
-    # Near kitchen
-    [0.0, 0.0],    # near-left baseline corner
-    [20.0, 0.0],   # near-right baseline corner
-    [20.0, 7.0],   # near-right kitchen line
-    [0.0, 7.0],    # near-left kitchen line
-    # Far kitchen
-    [0.0, 20.0],   # far-left kitchen line
-    [20.0, 20.0],  # far-right kitchen line
-    [20.0, 27.0],  # far-left baseline corner
-    [0.0, 27.0],   # far-right baseline corner
+    # Left kitchen
+    [0.0, 0.0],    # left baseline corner (left side)
+    [20.0, 0.0],   # left baseline corner (right side)
+    [20.0, 7.0],   # left kitchen line (right side)
+    [0.0, 7.0],    # left kitchen line (left side)
+    # Right kitchen
+    [0.0, 20.0],   # right kitchen line (left side)
+    [20.0, 20.0],  # right kitchen line (right side)
+    [20.0, 27.0],  # right baseline corner (right side)
+    [0.0, 27.0],   # right baseline corner (left side)
 ]
 
 # ── Keypoint indices ─────────────────────────────────────────────────────────

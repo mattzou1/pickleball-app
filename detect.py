@@ -18,6 +18,7 @@ import numpy as np
 from tqdm import tqdm
 from ultralytics import YOLO
 
+from pickleball.annotate import annotate_frame
 from pickleball.ball import (
     LIVE,
     UNKNOWN,
@@ -71,6 +72,7 @@ def run_detection(
     config_path: str,
     pose_model_path: str = "models/yolov8m-pose.pt",
     ball_model_path: str | None = None,
+    debug_video_path: str | None = None,
 ) -> str:
     """Run the full detection pipeline.
 
@@ -168,6 +170,12 @@ def run_detection(
     velocities = compute_vertical_velocity(ball_detections)
     bounce_frames = detect_bounces(ball_detections, velocities)
 
+    # Build bounce events list for annotation (frame index + side)
+    bounce_events = []
+    for bf in bounce_frames:
+        side = classify_bounce_side(bf, ball_detections)
+        bounce_events.append({"frame": bf, "side": side})
+
     # Check ball detection rate for fallback mode
     detected_count = sum(1 for d in ball_detections if d is not None and not d.get("interpolated"))
     detection_rate = detected_count / max(total_frames, 1)
@@ -190,7 +198,7 @@ def run_detection(
 
         ball_side = None
         if detected and "court_y" in det:
-            ball_side = "near" if det["court_y"] < 13.5 else "far"
+            ball_side = "left" if det["court_y"] < 13.5 else "right"
 
         ball_sm.update_detection(detected, ball_side=ball_side)
 
@@ -200,8 +208,8 @@ def run_detection(
                 ball_sm.update_bounce(side)
 
         ball_states_per_frame.append({
-            "near": ball_sm.get_state("near"),
-            "far": ball_sm.get_state("far"),
+            "left": ball_sm.get_state("left"),
+            "right": ball_sm.get_state("right"),
         })
 
     # ── Pass 2: Fault correlation ────────────────────────────────────────────
@@ -210,12 +218,13 @@ def run_detection(
     consecutive_tracker: dict[tuple[int, str], int] = {}
     faults = []
     fault_id = 0
+    fault_frame_set: set[int] = set()  # frame indices with at least one fault
 
     for frame_idx in range(len(pose_data)):
         frame_poses = pose_data[frame_idx]
-        frame_states = ball_states_per_frame[frame_idx] if frame_idx < len(ball_states_per_frame) else {"near": UNKNOWN, "far": UNKNOWN}
+        frame_states = ball_states_per_frame[frame_idx] if frame_idx < len(ball_states_per_frame) else {"left": UNKNOWN, "right": UNKNOWN}
 
-        # Track which (track_id, side) pairs are active this frame
+        # Track which (track_id, zone) pairs are active this frame
         active_this_frame = set()
 
         for track_id, keypoints in frame_poses.items():
@@ -223,8 +232,8 @@ def run_detection(
             ankle_conf = get_ankle_confidence(keypoints)
 
             for hit in hits:
-                side = hit["side"]
-                key = (track_id, side)
+                zone = hit["zone"]
+                key = (track_id, zone)
                 active_this_frame.add(key)
 
                 consecutive_tracker[key] = consecutive_tracker.get(key, 0) + 1
@@ -235,7 +244,7 @@ def run_detection(
                     ball_state = UNKNOWN
                     ball_conf = 0.0
                 else:
-                    ball_state = frame_states.get(side, UNKNOWN)
+                    ball_state = frame_states.get(zone, UNKNOWN)
                     # Ball confidence from detection, or 1.0 if state came from rules
                     ball_det = ball_detections[frame_idx] if frame_idx < len(ball_detections) else None
                     ball_conf = ball_det["conf"] if ball_det is not None and "conf" in ball_det else 0.0
@@ -262,6 +271,7 @@ def run_detection(
                         "review_decision": None,
                     }
                     faults.append(fault_entry)
+                    fault_frame_set.add(frame_idx)
 
         # Reset consecutive count for players who left the zone
         for key in list(consecutive_tracker.keys()):
@@ -274,6 +284,7 @@ def run_detection(
     output_path = f"output/{video_name}_faults.json"
 
     output = {
+        "schema_version": 2,
         "video_path": os.path.abspath(video_path),
         "processed_at": datetime.now(timezone.utc).isoformat(),
         "calibration_file": os.path.abspath(config_path),
@@ -296,18 +307,107 @@ def run_detection(
     if fallback_mode:
         print(f"  (fallback mode: ball detection rate {detection_rate:.1%})")
 
+    # ── Pass 3: Debug video (optional) ───────────────────────────────────────
+    if debug_video_path:
+        _write_debug_video(
+            video_path=video_path,
+            debug_video_path=debug_video_path,
+            total_frames=total_frames,
+            fps=fps,
+            video_w=video_w,
+            video_h=video_h,
+            config=config,
+            H=H,
+            pose_data=pose_data,
+            ball_detections=ball_detections,
+            ball_states_per_frame=ball_states_per_frame,
+            bounce_events=bounce_events,
+            fault_frame_set=fault_frame_set,
+            fallback_mode=fallback_mode,
+        )
+
     return output_path
+
+
+def _write_debug_video(
+    video_path: str,
+    debug_video_path: str,
+    total_frames: int,
+    fps: float,
+    video_w: int,
+    video_h: int,
+    config: dict,
+    H: np.ndarray,
+    pose_data: list[dict],
+    ball_detections: list,
+    ball_states_per_frame: list[dict],
+    bounce_events: list[dict],
+    fault_frame_set: set[int],
+    fallback_mode: bool,
+) -> None:
+    """Write annotated debug video. Called after all detection passes complete."""
+    os.makedirs(os.path.dirname(debug_video_path) if os.path.dirname(debug_video_path) else ".", exist_ok=True)
+
+    cap = cv2.VideoCapture(video_path)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(debug_video_path, fourcc, fps, (video_w, video_h))
+
+    if not writer.isOpened():
+        print(f"Warning: could not open VideoWriter for {debug_video_path}")
+        cap.release()
+        return
+
+    ball_trail: list[tuple[int, int]] = []
+
+    print(f"\nWriting debug video to {debug_video_path}...")
+    for frame_idx in tqdm(range(total_frames), desc="Annotating"):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Update ball trail
+        det = ball_detections[frame_idx] if frame_idx < len(ball_detections) else None
+        if det is not None:
+            ball_trail.append((int(det["x"]), int(det["y"])))
+            if len(ball_trail) > 10:
+                ball_trail = ball_trail[-10:]
+
+        ball_states = (
+            ball_states_per_frame[frame_idx]
+            if frame_idx < len(ball_states_per_frame)
+            else {"left": UNKNOWN, "right": UNKNOWN}
+        )
+
+        annotated = annotate_frame(
+            frame=frame,
+            frame_idx=frame_idx,
+            config=config,
+            pose_data_frame=pose_data[frame_idx] if frame_idx < len(pose_data) else {},
+            ball_trail=list(ball_trail),
+            ball_states=ball_states,
+            bounce_events=bounce_events,
+            fault_frame_set=fault_frame_set,
+            H=H,
+            fallback_mode=fallback_mode,
+        )
+        writer.write(annotated)
+
+    cap.release()
+    writer.release()
+    print(f"Debug video saved to {debug_video_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Detect kitchen faults in pickleball video")
     parser.add_argument("video", help="Path to video file")
     parser.add_argument("--calibration", required=True, help="Path to calibration JSON")
-    parser.add_argument("--pose-model", default="yolov8m-pose.pt", help="Path to pose model")
+    parser.add_argument("--pose-model", default="models/yolov8m-pose.pt", help="Path to pose model")
     parser.add_argument("--ball-model", default=None, help="Path to ball detection model")
+    parser.add_argument("--debug-video", default=None, metavar="PATH",
+                        help="Write annotated debug video to PATH (e.g. output/debug.mp4)")
     args = parser.parse_args()
 
-    run_detection(args.video, args.calibration, args.pose_model, args.ball_model)
+    run_detection(args.video, args.calibration, args.pose_model, args.ball_model, args.debug_video)
 
 
 if __name__ == "__main__":

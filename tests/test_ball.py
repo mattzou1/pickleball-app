@@ -116,34 +116,34 @@ def test_bounce_detection_hovering():
     # This is acceptable either way since the confidence will be low.
 
 
-def test_classify_bounce_near():
-    """Bounce at court_y=3 is near side."""
+def test_classify_bounce_left():
+    """Bounce at court_y=3 is left side."""
     dets = [None, None, {"court_y": 3.0}]
-    assert classify_bounce_side(2, dets) == "near"
+    assert classify_bounce_side(2, dets) == "left"
 
 
-def test_classify_bounce_far():
-    """Bounce at court_y=23 is far side."""
+def test_classify_bounce_right():
+    """Bounce at court_y=23 is right side."""
     dets = [None, None, {"court_y": 23.0}]
-    assert classify_bounce_side(2, dets) == "far"
+    assert classify_bounce_side(2, dets) == "right"
 
 
 # ── State machine tests ─────────────────────────────────────────────────────
 
-def test_state_bounce_near_side():
-    """Bounce on near side: near=BOUNCED, far=LIVE."""
+def test_state_bounce_left_side():
+    """Bounce on left side: left=BOUNCED, right=LIVE."""
     sm = BallStateMachine()
-    sm.update_bounce("near")
-    assert sm.get_state("near") == BOUNCED
-    assert sm.get_state("far") == LIVE
+    sm.update_bounce("left")
+    assert sm.get_state("left") == BOUNCED
+    assert sm.get_state("right") == LIVE
 
 
-def test_state_bounce_far_side():
-    """Bounce on far side: far=BOUNCED, near=LIVE."""
+def test_state_bounce_right_side():
+    """Bounce on right side: right=BOUNCED, left=LIVE."""
     sm = BallStateMachine()
-    sm.update_bounce("far")
-    assert sm.get_state("far") == BOUNCED
-    assert sm.get_state("near") == LIVE
+    sm.update_bounce("right")
+    assert sm.get_state("right") == BOUNCED
+    assert sm.get_state("left") == LIVE
 
 
 def test_state_no_detection_unknown():
@@ -151,8 +151,8 @@ def test_state_no_detection_unknown():
     sm = BallStateMachine(unknown_gap_frames=10)
     for _ in range(11):
         sm.update_detection(False)
-    assert sm.get_state("near") == UNKNOWN
-    assert sm.get_state("far") == UNKNOWN
+    assert sm.get_state("left") == UNKNOWN
+    assert sm.get_state("right") == UNKNOWN
 
 
 def test_state_detection_resets_gap():
@@ -160,28 +160,28 @@ def test_state_detection_resets_gap():
     sm = BallStateMachine(unknown_gap_frames=10)
     for _ in range(9):
         sm.update_detection(False)
-    sm.update_detection(True, ball_side="near")
+    sm.update_detection(True, ball_side="left")
     # Not yet unknown
-    assert sm.get_state("near") != UNKNOWN
+    assert sm.get_state("left") != UNKNOWN
 
 
 def test_state_net_crossing():
     """Ball crossing net resets destination side to LIVE."""
     sm = BallStateMachine()
-    sm.update_bounce("near")  # near=BOUNCED
-    assert sm.get_state("near") == BOUNCED
+    sm.update_bounce("left")  # left=BOUNCED
+    assert sm.get_state("left") == BOUNCED
 
-    # Ball crosses net heading near
-    sm.update_net_crossing("near")
-    assert sm.get_state("near") == LIVE
+    # Ball crosses net heading left
+    sm.update_net_crossing("left")
+    assert sm.get_state("left") == LIVE
 
 
 def test_state_net_crossing_via_detection():
     """Net crossing detected via ball_side change."""
     sm = BallStateMachine()
-    sm.update_bounce("near")  # near=BOUNCED
+    sm.update_bounce("left")  # left=BOUNCED
 
-    # Ball moves from far to near (crosses net)
-    sm.update_detection(True, ball_side="far")
-    sm.update_detection(True, ball_side="near")  # triggers net crossing
-    assert sm.get_state("near") == LIVE
+    # Ball moves from right to left (crosses net)
+    sm.update_detection(True, ball_side="right")
+    sm.update_detection(True, ball_side="left")  # triggers net crossing
+    assert sm.get_state("left") == LIVE
