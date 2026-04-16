@@ -75,10 +75,15 @@ Without `--ball-model`, all kitchen entries are logged as REVIEW_NEEDED (fallbac
 - `--ball-stride 2` (default) — run ball detection every Nth frame; interpolation fills gaps.
 - `--half` / `--no-half` — force fp16/fp32. Default: fp16 when CUDA is available.
 
-**WholeBody knobs:**
+**Backend selection:**
 - `--pose-backend {wholebody,ultralytics}` — default `wholebody`.
-- `--detector-model models/yolov8s.pt` (default) — person detector for WholeBody. Bump to `models/yolov8x.pt` only if you see missed detections. All ultralytics weights live in `models/`; `detect.py` creates the directory on startup so auto-download writes there.
+
+**WholeBody-only knobs** (ignored when `--pose-backend ultralytics`):
+- `--detector-model models/yolov8s.pt` (default) — person detector. Bump to `models/yolov8x.pt` only if you see missed detections. All ultralytics weights live in `models/`; `detect.py` creates the directory on startup so auto-download writes there.
 - `--wholebody-mode {balanced,performance,lightweight}` — default `balanced` (DWPose-L @ 192x256). `performance` adds resolution for marginal accuracy gain; `lightweight` is fastest, for mobile or low-end CPU.
+
+**Ultralytics-only knobs** (ignored when `--pose-backend wholebody`):
+- `--pose-model models/yolov8x-pose-p6.pt` (default) — path to ultralytics pose model.
 
 Outputs to `output/{video_name}_faults.json`.
 

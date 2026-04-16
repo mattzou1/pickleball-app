@@ -432,20 +432,20 @@ def main():
     parser = argparse.ArgumentParser(description="Detect kitchen faults in pickleball video")
     parser.add_argument("video", help="Path to video file")
     parser.add_argument("--calibration", required=True, help="Path to calibration JSON")
-    parser.add_argument("--pose-model", default="models/yolov8x-pose-p6.pt",
-                        help="Path to ultralytics pose model. Used when --pose-backend=ultralytics. "
-                             "COCO 17-kp models use ankle keypoints (WholeBody preferred for accuracy).")
     parser.add_argument("--pose-backend", choices=["ultralytics", "wholebody"], default="wholebody",
                         help="'wholebody' (default) = ultralytics person tracker + rtmlib RTMPose WholeBody "
                              "(133 kp, true shoe-tip keypoints). "
                              "'ultralytics' = single-model YOLO pose (COCO 17 kp, ankle-based zone check).")
+    parser.add_argument("--pose-model", default="models/yolov8x-pose-p6.pt",
+                        help="(ultralytics only) Path to ultralytics pose model. "
+                             "COCO 17-kp models use ankle keypoints (WholeBody preferred for accuracy).")
     parser.add_argument("--detector-model", default="models/yolov8s.pt",
-                        help="Person detector for --pose-backend=wholebody (auto-downloads via ultralytics into models/). "
+                        help="(wholebody only) Person detector model (auto-downloads via ultralytics into models/). "
                              "Default models/yolov8s.pt is plenty for 2-4 large subjects on a static court; "
                              "use models/yolov8x.pt only if you see missed detections.")
     parser.add_argument("--wholebody-mode", choices=["performance", "balanced", "lightweight"],
                         default="balanced",
-                        help="rtmlib pose tier. Default 'balanced' (DWPose-L @ 192x256). "
+                        help="(wholebody only) rtmlib pose tier. Default 'balanced' (DWPose-L @ 192x256). "
                              "'performance' = DWPose-L @ 288x384 (slower, marginal accuracy gain). "
                              "'lightweight' = RTMPose-M (fastest, for mobile or low-end CPU).")
     parser.add_argument("--ball-model", default=None, help="Path to ball detection model")
@@ -461,6 +461,15 @@ def main():
     parser.add_argument("--no-half", dest="half", action="store_false",
                         help="Force fp32 inference.")
     args = parser.parse_args()
+
+    if args.pose_backend == "wholebody" and args.pose_model != "models/yolov8x-pose-p6.pt":
+        print(f"Warning: --pose-model is ignored when --pose-backend=wholebody. "
+              f"Use --detector-model to change the person detector.")
+    if args.pose_backend == "ultralytics":
+        if args.detector_model != "models/yolov8s.pt":
+            print(f"Warning: --detector-model is ignored when --pose-backend=ultralytics.")
+        if args.wholebody_mode != "balanced":
+            print(f"Warning: --wholebody-mode is ignored when --pose-backend=ultralytics.")
 
     run_detection(
         args.video, args.calibration, args.pose_model, args.ball_model, args.debug_video,
