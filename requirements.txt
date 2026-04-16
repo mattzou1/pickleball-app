@@ -3,3 +3,22 @@ opencv-python>=4.8.0
 numpy>=1.24.0
 tqdm>=4.65.0
 pytest>=7.0.0
+
+# Pose + device
+torch>=2.1.0
+rtmlib>=0.0.13
+
+# ── GPU (Linux + NVIDIA) ─────────────────────────────────────────────────────
+# onnxruntime-gpu 1.24 wheels target CUDA 12.x. torch may ship with CUDA 13.x
+# libs, which onnxruntime cannot use. The nvidia-*-cu12 wheels provide the
+# CUDA 12 runtime libs that pickleball/_cuda_preload.py loads at startup so
+# rtmlib can run on GPU. Remove the -gpu package (and all nvidia-*-cu12
+# wheels) if you only need CPU inference and `pip install onnxruntime` instead.
+onnxruntime-gpu>=1.24.0; sys_platform == "linux"
+onnxruntime>=1.24.0; sys_platform != "linux"
+nvidia-cublas-cu12; sys_platform == "linux"
+nvidia-cudnn-cu12; sys_platform == "linux"
+nvidia-cuda-runtime-cu12; sys_platform == "linux"
+nvidia-cuda-nvrtc-cu12; sys_platform == "linux"
+nvidia-curand-cu12; sys_platform == "linux"
+nvidia-cufft-cu12; sys_platform == "linux"

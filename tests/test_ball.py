@@ -78,16 +78,13 @@ def test_interpolate_gap_at_end():
     assert result[2] is None
 
 
-def test_interpolate_court_coords():
-    """Court coords are also interpolated when present."""
-    dets = [
-        {"x": 0, "y": 0, "court_x": 0, "court_y": 0},
-        None,
-        {"x": 2, "y": 4, "court_x": 10, "court_y": 14},
-    ]
+def test_interpolate_marks_interpolated_flag():
+    """Interpolated entries carry an interpolated=True flag."""
+    dets = [{"x": 0, "y": 0}, None, {"x": 2, "y": 4}]
     result = interpolate_positions(dets)
-    assert result[1]["court_x"] == pytest.approx(5.0)
-    assert result[1]["court_y"] == pytest.approx(7.0)
+    assert result[1]["interpolated"] is True
+    assert result[1]["x"] == pytest.approx(1.0)
+    assert result[1]["y"] == pytest.approx(2.0)
 
 
 # ── Bounce detection tests ──────────────────────────────────────────────────
@@ -117,15 +114,20 @@ def test_bounce_detection_hovering():
 
 
 def test_classify_bounce_left():
-    """Bounce at court_y=3 is left side."""
-    dets = [None, None, {"court_y": 3.0}]
-    assert classify_bounce_side(2, dets) == "left"
+    """Bounce with pixel x < net_x is left."""
+    dets = [None, None, {"x": 300.0, "y": 500.0}]
+    assert classify_bounce_side(2, dets, net_x_pixel=500.0) == "left"
 
 
 def test_classify_bounce_right():
-    """Bounce at court_y=23 is right side."""
-    dets = [None, None, {"court_y": 23.0}]
-    assert classify_bounce_side(2, dets) == "right"
+    """Bounce with pixel x > net_x is right."""
+    dets = [None, None, {"x": 700.0, "y": 500.0}]
+    assert classify_bounce_side(2, dets, net_x_pixel=500.0) == "right"
+
+
+def test_classify_bounce_none_when_no_detection():
+    dets = [None, None, None]
+    assert classify_bounce_side(2, dets, net_x_pixel=500.0) is None
 
 
 # ── State machine tests ─────────────────────────────────────────────────────

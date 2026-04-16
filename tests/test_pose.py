@@ -4,36 +4,22 @@ import numpy as np
 import pytest
 
 from pickleball.pose import (
-    check_kitchen,
     check_player_in_kitchen,
-    compute_homography,
     extract_ankle_keypoints,
     extract_foot_keypoints,
     get_ankle_confidence,
+    get_pose_confidence,
     is_wholebody_model,
-    transform_to_court,
+    point_in_kitchen,
 )
-from pickleball.constants import WORLD_CORNERS
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture
-def identity_homography():
-    """Homography where pixel coords == court coords (for testing logic)."""
-    # Use corners that map 1:1 (pixel coords = world coords)
-    pixel_corners = WORLD_CORNERS.copy()
-    H = compute_homography(pixel_corners)
-    return H
-
-
-@pytest.fixture
-def sample_homography():
-    """Realistic homography from a scaled/shifted pixel space."""
-    # Pixel corners: scale world by 50 and shift by (100, 50)
-    pixel_corners = [[c[0] * 50 + 100, c[1] * 50 + 50] for c in WORLD_CORNERS]
-    H = compute_homography(pixel_corners)
-    return H
+def square_polygon():
+    """A 100x100 square polygon from (100,100) to (200,200)."""
+    return np.array([[100, 100], [200, 100], [200, 200], [100, 200]], dtype=np.int32)
 
 
 def make_keypoints(num_kp=17, overrides=None):
@@ -50,55 +36,39 @@ def make_keypoints(num_kp=17, overrides=None):
     return kps
 
 
-# ── Homography tests ────────────────────────────────────────────────────────
+# ── point_in_kitchen tests ──────────────────────────────────────────────────
 
-def test_transform_to_court_known_point(sample_homography):
-    """Verify homography maps a known pixel to expected court coord."""
-    # Pixel (100, 50) should map to court (0, 0) - left baseline corner
-    cx, cy = transform_to_court((100, 50), sample_homography)
-    assert abs(cx - 0.0) < 0.1
-    assert abs(cy - 0.0) < 0.1
+def test_point_inside(square_polygon):
+    assert point_in_kitchen(150, 150, square_polygon) is True
 
 
-def test_transform_to_court_far_corner(sample_homography):
-    """Verify far-right baseline corner maps correctly."""
-    # Pixel (100 + 20*50, 50 + 27*50) = (1100, 1400) should map to (20, 27)
-    cx, cy = transform_to_court((1100, 1400), sample_homography)
-    assert abs(cx - 20.0) < 0.1
-    assert abs(cy - 27.0) < 0.1
+def test_point_outside(square_polygon):
+    assert point_in_kitchen(50, 50, square_polygon) is False
 
 
-# ── Zone check tests ────────────────────────────────────────────────────────
-
-def test_check_kitchen_left():
-    """Court coord (10, 3) is in left kitchen."""
-    assert check_kitchen(10.0, 3.0) == "left"
-
-
-def test_check_kitchen_right():
-    """Court coord (10, 23) is in right kitchen."""
-    assert check_kitchen(10.0, 23.0) == "right"
+def test_point_on_boundary(square_polygon):
+    """Edge counts as inside (pointPolygonTest returns 0 on boundary)."""
+    assert point_in_kitchen(100, 150, square_polygon) is True
+    assert point_in_kitchen(200, 150, square_polygon) is True
 
 
-def test_check_kitchen_boundary():
-    """Court coord (10, 7) is ON the left kitchen line (fault)."""
-    assert check_kitchen(10.0, 7.0) == "left"
+def test_point_on_corner(square_polygon):
+    assert point_in_kitchen(100, 100, square_polygon) is True
 
 
-def test_check_kitchen_right_boundary():
-    """Court coord (10, 20) is ON the right kitchen line (fault)."""
-    assert check_kitchen(10.0, 20.0) == "right"
+def test_point_just_outside_within_tolerance(square_polygon):
+    """A point 3 px outside the left edge counts as inside under the default tolerance."""
+    assert point_in_kitchen(97, 150, square_polygon) is True
 
 
-def test_check_outside_kitchen():
-    """Court coord (10, 10) is not in either kitchen."""
-    assert check_kitchen(10.0, 10.0) is None
+def test_point_outside_beyond_tolerance(square_polygon):
+    """A point 10 px outside the left edge exceeds the default ~5 px tolerance."""
+    assert point_in_kitchen(90, 150, square_polygon) is False
 
 
-def test_check_kitchen_with_buffer():
-    """Buffer expands zone: (10, 7.4) is outside, but within 0.5 buffer."""
-    assert check_kitchen(10.0, 7.4) is None
-    assert check_kitchen(10.0, 7.4, buffer=0.5) == "left"
+def test_explicit_tolerance_override(square_polygon):
+    """Passing tolerance_px=0.0 restores strict-boundary behavior."""
+    assert point_in_kitchen(97, 150, square_polygon, tolerance_px=0.0) is False
 
 
 # ── Model detection tests ───────────────────────────────────────────────────
@@ -139,21 +109,19 @@ def test_foot_kp_above_zone_threshold_used():
 def test_wholebody_indices_correct():
     """Keypoints 17-22 are extracted, not 15-16."""
     overrides = {
-        15: (50, 50, 0.9),   # left ankle - should NOT be in foot keypoints
-        16: (60, 60, 0.9),   # right ankle - should NOT be in foot keypoints
-        17: (100, 200, 0.5),  # left big toe
-        18: (105, 205, 0.5),  # left small toe
-        19: (95, 195, 0.5),   # left heel
-        20: (200, 200, 0.5),  # right big toe
-        21: (205, 205, 0.5),  # right small toe
-        22: (195, 195, 0.5),  # right heel
+        15: (50, 50, 0.9),
+        16: (60, 60, 0.9),
+        17: (100, 200, 0.5),
+        18: (105, 205, 0.5),
+        19: (95, 195, 0.5),
+        20: (200, 200, 0.5),
+        21: (205, 205, 0.5),
+        22: (195, 195, 0.5),
     }
     kps = make_keypoints(23, overrides)
     result = extract_foot_keypoints(kps)
     indices = {r["index"] for r in result}
     assert indices == {17, 18, 19, 20, 21, 22}
-    assert 15 not in indices
-    assert 16 not in indices
 
 
 # ── Ankle keypoint extraction tests ─────────────────────────────────────────
@@ -175,43 +143,57 @@ def test_ankle_above_threshold_extracted():
 
 # ── check_player_in_kitchen integration tests ───────────────────────────────
 
-def test_any_foot_kp_in_zone_triggers_fault(identity_homography):
+def test_any_foot_kp_in_zone_triggers_fault(square_polygon):
     """Big toe in zone but heel outside -> fault (ANY triggers)."""
     overrides = {
-        17: (10, 3, 0.5),   # left big toe IN left kitchen
-        19: (10, 10, 0.5),  # left heel OUTSIDE kitchen
+        17: (150, 150, 0.5),   # left big toe INSIDE polygon
+        19: (50, 50, 0.5),     # left heel OUTSIDE polygon
     }
     kps = make_keypoints(23, overrides)
-    hits = check_player_in_kitchen(kps, identity_homography)
+    hits = check_player_in_kitchen(kps, square_polygon)
     assert len(hits) >= 1
-    assert any(h["zone"] == "left" for h in hits)
+    assert all(h["zone"] == "kitchen" for h in hits)
+    assert hits[0]["source"] == "foot"
 
 
-def test_all_foot_kps_outside_no_fault(identity_homography):
+def test_all_foot_kps_outside_no_fault(square_polygon):
     """All 6 foot keypoints outside kitchen -> no fault."""
-    overrides = {
-        17: (10, 10, 0.5),
-        18: (10, 10, 0.5),
-        19: (10, 10, 0.5),
-        20: (10, 10, 0.5),
-        21: (10, 10, 0.5),
-        22: (10, 10, 0.5),
-    }
+    overrides = {i: (50, 50, 0.5) for i in range(17, 23)}
     kps = make_keypoints(23, overrides)
-    hits = check_player_in_kitchen(kps, identity_homography)
+    hits = check_player_in_kitchen(kps, square_polygon)
     assert len(hits) == 0
 
 
-def test_coco17_fallback_uses_buffer(identity_homography):
-    """COCO 17 model uses ankle + buffer for zone check."""
-    # Ankle at (10, 7.3) is outside kitchen (max 7.0) but within buffer (0.5)
-    kps = make_keypoints(17, {15: (10, 7.3, 0.6)})
-    hits = check_player_in_kitchen(kps, identity_homography)
+def test_coco17_uses_ankles(square_polygon):
+    """COCO 17 model uses ankle keypoints for zone check."""
+    kps = make_keypoints(17, {15: (150, 150, 0.6)})
+    hits = check_player_in_kitchen(kps, square_polygon)
     assert len(hits) == 1
     assert hits[0]["source"] == "ankle"
 
 
-# ── Ankle confidence for scoring ─────────────────────────────────────────────
+def test_foot_side_tagged_by_net_x(square_polygon):
+    """foot_side is derived from pixel x vs net_x_pixel."""
+    # Two foot keypoints, one on each side of net_x=150.
+    overrides = {
+        17: (120, 150, 0.5),  # left of net
+        20: (180, 150, 0.5),  # right of net
+    }
+    kps = make_keypoints(23, overrides)
+    hits = check_player_in_kitchen(kps, square_polygon, net_x_pixel=150.0)
+    sides = {h["foot_side"] for h in hits}
+    assert "left" in sides
+    assert "right" in sides
+
+
+def test_foot_side_none_without_net(square_polygon):
+    """foot_side is None when net_x_pixel not provided."""
+    kps = make_keypoints(23, {17: (150, 150, 0.5)})
+    hits = check_player_in_kitchen(kps, square_polygon)
+    assert hits[0]["foot_side"] is None
+
+
+# ── Pose confidence for scoring ──────────────────────────────────────────────
 
 def test_get_ankle_confidence_both():
     """Returns max of both ankles."""
@@ -223,3 +205,27 @@ def test_get_ankle_confidence_below_threshold():
     """Returns 0.0 if both ankles below threshold."""
     kps = make_keypoints(17, {15: (0, 0, 0.3), 16: (0, 0, 0.4)})
     assert get_ankle_confidence(kps) == 0.0
+
+
+def test_pose_confidence_prefers_ankle():
+    """Ankle conf ≥ threshold wins over foot-kp fallback."""
+    kps = make_keypoints(23, {15: (0, 0, 0.8), 17: (0, 0, 0.9)})
+    assert get_pose_confidence(kps) == pytest.approx(0.8)
+
+
+def test_pose_confidence_foot_fallback_when_ankle_occluded():
+    """WholeBody: when ankle < threshold, fall back to best foot-kp conf."""
+    kps = make_keypoints(23, {15: (0, 0, 0.3), 16: (0, 0, 0.4), 17: (0, 0, 0.6), 20: (0, 0, 0.55)})
+    conf = get_pose_confidence(kps)
+    assert conf == pytest.approx(0.6)
+
+
+def test_pose_confidence_zero_when_nothing_reliable():
+    kps = make_keypoints(23, {17: (0, 0, 0.1)})  # below foot threshold
+    assert get_pose_confidence(kps) == 0.0
+
+
+def test_pose_confidence_coco17_no_foot_fallback():
+    """COCO 17 model has no foot keypoints — falls back to 0.0 when ankles are low."""
+    kps = make_keypoints(17, {15: (0, 0, 0.3)})
+    assert get_pose_confidence(kps) == 0.0

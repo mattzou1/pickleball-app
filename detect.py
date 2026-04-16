@@ -13,8 +13,11 @@ import os
 import sys
 from datetime import datetime, timezone
 
+import pickleball._cuda_preload  # noqa: F401  — must precede onnxruntime/rtmlib imports
+
 import cv2
 import numpy as np
+import torch
 from tqdm import tqdm
 from ultralytics import YOLO
 
@@ -31,15 +34,16 @@ from pickleball.ball import (
 from pickleball.constants import (
     BALL_UNKNOWN_GAP_FRAMES,
     CONSECUTIVE_FRAMES_MIN,
+    CONSECUTIVE_GAP_TOLERANCE,
     scale_frame_threshold,
 )
 from pickleball.fault import correlate_fault
 from pickleball.pose import (
     check_player_in_kitchen,
-    compute_homography,
-    get_ankle_confidence,
-    transform_to_court,
+    get_pose_confidence,
+    is_wholebody_model,
 )
+from pickleball.pose_backend import make_backend
 
 
 def load_calibration(config_path: str) -> dict:
@@ -47,11 +51,16 @@ def load_calibration(config_path: str) -> dict:
     with open(config_path) as f:
         config = json.load(f)
 
-    required = ["pixel_corners", "homography_matrix", "net_x_pixel", "input_resolution"]
+    required = ["kitchen_polygon", "net_x_pixel", "input_resolution"]
     for key in required:
         if key not in config:
-            print(f"Error: calibration missing '{key}'")
+            print(f"Error: calibration missing '{key}'. "
+                  "Re-run calibrate.py — the schema has changed (4-corner kitchen polygon).")
             sys.exit(1)
+
+    if len(config["kitchen_polygon"]) < 3:
+        print("Error: kitchen_polygon must have at least 3 points.")
+        sys.exit(1)
 
     return config
 
@@ -70,9 +79,15 @@ def validate_resolution(config: dict, video_w: int, video_h: int) -> None:
 def run_detection(
     video_path: str,
     config_path: str,
-    pose_model_path: str = "models/yolov8m-pose.pt",
+    pose_model_path: str = "models/yolov8x-pose-p6.pt",
     ball_model_path: str | None = None,
     debug_video_path: str | None = None,
+    imgsz: int = 640,
+    ball_stride: int = 2,
+    half: bool | None = None,
+    pose_backend: str = "wholebody",
+    detector_model_path: str = "models/yolov8s.pt",
+    wholebody_mode: str = "balanced",
 ) -> str:
     """Run the full detection pipeline.
 
@@ -81,8 +96,8 @@ def run_detection(
     """
     # Load calibration
     config = load_calibration(config_path)
-    H = np.array(config["homography_matrix"], dtype=np.float64)
-    net_x_pixel = config["net_x_pixel"]
+    polygon = np.array(config["kitchen_polygon"], dtype=np.int32)
+    net_x_pixel = float(config["net_x_pixel"])
 
     # Open video
     cap = cv2.VideoCapture(video_path)
@@ -100,19 +115,37 @@ def run_detection(
     # Scale frame thresholds for actual fps
     min_consecutive = scale_frame_threshold(CONSECUTIVE_FRAMES_MIN, fps)
     unknown_gap = scale_frame_threshold(BALL_UNKNOWN_GAP_FRAMES, fps)
+    gap_tolerance = scale_frame_threshold(CONSECUTIVE_GAP_TOLERANCE, fps)
 
-    # Load models
-    pose_model = YOLO(pose_model_path)
+    # fp16 inference only benefits CUDA. On CPU/MPS ultralytics falls back to fp32.
+    if half is None:
+        half = torch.cuda.is_available()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # All ultralytics weights live under models/. Ensure the dir exists so
+    # ultralytics auto-download can write there for missing weights.
+    os.makedirs("models", exist_ok=True)
+
+    # Load pose backend
+    backend = make_backend(
+        pose_backend,
+        pose_model_path=pose_model_path,
+        detector_model_path=detector_model_path,
+        wholebody_mode=wholebody_mode,
+        device=device,
+    )
 
     ball_model = None
     if ball_model_path:
         ball_model = YOLO(ball_model_path)
 
+    infer_kwargs = {"imgsz": imgsz, "half": half, "verbose": False}
+
     # ── Pass 1: Collect pose and ball detections ─────────────────────────────
-    # Per-frame pose data: {track_id: keypoints}
     pose_data = []
-    # Per-frame ball detection: {x, y} or None
     ball_detections: list[dict | None] = []
+
+    _model_type_warned = False
 
     print(f"Processing {total_frames} frames at {fps:.1f} fps...")
 
@@ -121,43 +154,34 @@ def run_detection(
         if not ret:
             break
 
-        # Pose tracking
-        pose_results = pose_model.track(frame, persist=True, verbose=False)
-        frame_poses = {}
+        frame_poses = backend.track(frame, imgsz=imgsz, half=half)
 
-        if pose_results and pose_results[0].boxes is not None:
-            boxes = pose_results[0].boxes
-            keypoints_all = pose_results[0].keypoints
-
-            if keypoints_all is not None and boxes.id is not None:
-                ids = boxes.id.cpu().numpy().astype(int)
-                kps = keypoints_all.data.cpu().numpy()  # (N, num_kp, 3)
-
-                for i, track_id in enumerate(ids):
-                    frame_poses[int(track_id)] = kps[i]
+        if not _model_type_warned and frame_poses:
+            _model_type_warned = True
+            first_kps = next(iter(frame_poses.values()))
+            if not is_wholebody_model(first_kps):
+                print(
+                    "Warning: COCO 17-keypoint model detected. "
+                    "Ankle fallback active. "
+                    "For accurate shoe-tip detection, run with --pose-backend wholebody."
+                )
 
         pose_data.append(frame_poses)
 
-        # Ball detection
+        # Ball detection (skip every Nth frame; interpolation fills the gaps)
         ball_det = None
-        if ball_model is not None:
-            ball_results = ball_model(frame, verbose=False)
+        if ball_model is not None and (frame_idx % ball_stride == 0):
+            ball_results = ball_model(frame, **infer_kwargs)
             if ball_results and ball_results[0].boxes is not None and len(ball_results[0].boxes) > 0:
-                # Take highest confidence detection
                 boxes = ball_results[0].boxes
                 best_idx = boxes.conf.argmax()
                 x1, y1, x2, y2 = boxes.xyxy[best_idx].cpu().numpy()
                 cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
                 conf = float(boxes.conf[best_idx])
 
-                # Transform to court coords
-                court_x, court_y = transform_to_court((float(cx), float(cy)), H)
-
                 ball_det = {
                     "x": float(cx),
                     "y": float(cy),
-                    "court_x": court_x,
-                    "court_y": court_y,
                     "conf": conf,
                 }
 
@@ -170,10 +194,9 @@ def run_detection(
     velocities = compute_vertical_velocity(ball_detections)
     bounce_frames = detect_bounces(ball_detections, velocities)
 
-    # Build bounce events list for annotation (frame index + side)
     bounce_events = []
     for bf in bounce_frames:
-        side = classify_bounce_side(bf, ball_detections)
+        side = classify_bounce_side(bf, ball_detections, net_x_pixel)
         bounce_events.append({"frame": bf, "side": side})
 
     # Check ball detection rate for fallback mode
@@ -188,7 +211,6 @@ def run_detection(
     # Build ball state machine
     ball_sm = BallStateMachine(unknown_gap_frames=unknown_gap)
 
-    # Pre-compute ball states per frame
     ball_states_per_frame = []
     bounce_set = set(bounce_frames)
 
@@ -197,13 +219,13 @@ def run_detection(
         detected = det is not None
 
         ball_side = None
-        if detected and "court_y" in det:
-            ball_side = "left" if det["court_y"] < 13.5 else "right"
+        if detected:
+            ball_side = "left" if det["x"] < net_x_pixel else "right"
 
         ball_sm.update_detection(detected, ball_side=ball_side)
 
         if frame_idx in bounce_set:
-            side = classify_bounce_side(frame_idx, ball_detections)
+            side = classify_bounce_side(frame_idx, ball_detections, net_x_pixel)
             if side:
                 ball_sm.update_bounce(side)
 
@@ -213,49 +235,55 @@ def run_detection(
         })
 
     # ── Pass 2: Fault correlation ────────────────────────────────────────────
-    # Track consecutive frames per player per side
-    # Key: (track_id, side) -> consecutive frame count
-    consecutive_tracker: dict[tuple[int, str], int] = {}
+    # Consecutive-frame streak per track_id, with a small gap tolerance so that
+    # single-frame tracker flickers don't reset a legitimate streak.
+    consecutive_tracker: dict[int, int] = {}
+    gap_seen: dict[int, int] = {}
     faults = []
     fault_id = 0
-    fault_frame_set: set[int] = set()  # frame indices with at least one fault
+    fault_frame_set: set[int] = set()
 
     for frame_idx in range(len(pose_data)):
         frame_poses = pose_data[frame_idx]
         frame_states = ball_states_per_frame[frame_idx] if frame_idx < len(ball_states_per_frame) else {"left": UNKNOWN, "right": UNKNOWN}
 
-        # Track which (track_id, zone) pairs are active this frame
-        active_this_frame = set()
+        active_this_frame: set[int] = set()
 
         for track_id, keypoints in frame_poses.items():
-            hits = check_player_in_kitchen(keypoints, H)
-            ankle_conf = get_ankle_confidence(keypoints)
+            hits = check_player_in_kitchen(keypoints, polygon, net_x_pixel=net_x_pixel)
+            if not hits:
+                continue
 
+            pose_conf = get_pose_confidence(keypoints)
+            active_this_frame.add(track_id)
+            gap_seen[track_id] = 0
+            consecutive_tracker[track_id] = consecutive_tracker.get(track_id, 0) + 1
+            consec = consecutive_tracker[track_id]
+
+            # Pick the ball state for the side of the net the foot is on.
+            # Default to left if foot_side is missing.
+            foot_sides = {h.get("foot_side") for h in hits if h.get("foot_side")}
+            foot_side = next(iter(foot_sides), "left")
+
+            if fallback_mode:
+                ball_state = UNKNOWN
+                ball_conf = 1.0
+            else:
+                ball_state = frame_states.get(foot_side, UNKNOWN)
+                ball_det = ball_detections[frame_idx] if frame_idx < len(ball_detections) else None
+                ball_conf = ball_det["conf"] if ball_det is not None and "conf" in ball_det else 0.0
+                if ball_state in (LIVE, "BOUNCED") and ball_conf == 0.0:
+                    ball_conf = 1.0
+                elif ball_state == UNKNOWN:
+                    ball_conf = 1.0
+
+            # Emit one fault per hit this frame (one per foot keypoint that's inside).
             for hit in hits:
-                zone = hit["zone"]
-                key = (track_id, zone)
-                active_this_frame.add(key)
-
-                consecutive_tracker[key] = consecutive_tracker.get(key, 0) + 1
-                consec = consecutive_tracker[key]
-
-                # Determine ball state and confidence
-                if fallback_mode:
-                    ball_state = UNKNOWN
-                    ball_conf = 0.0
-                else:
-                    ball_state = frame_states.get(zone, UNKNOWN)
-                    # Ball confidence from detection, or 1.0 if state came from rules
-                    ball_det = ball_detections[frame_idx] if frame_idx < len(ball_detections) else None
-                    ball_conf = ball_det["conf"] if ball_det is not None and "conf" in ball_det else 0.0
-                    if ball_state in (LIVE, "BOUNCED") and ball_conf == 0.0:
-                        ball_conf = 1.0  # state inferred from rules
-
                 result = correlate_fault(
                     zone_hit=hit,
                     ball_state=ball_state,
                     consecutive_frames=consec,
-                    ankle_conf=ankle_conf,
+                    ankle_conf=pose_conf,
                     ball_conf=ball_conf,
                     min_consecutive=min_consecutive,
                 )
@@ -273,10 +301,14 @@ def run_detection(
                     faults.append(fault_entry)
                     fault_frame_set.add(frame_idx)
 
-        # Reset consecutive count for players who left the zone
+        # Decay inactive keys; delete only after tolerance exceeded.
         for key in list(consecutive_tracker.keys()):
-            if key not in active_this_frame:
+            if key in active_this_frame:
+                continue
+            gap_seen[key] = gap_seen.get(key, 0) + 1
+            if gap_seen[key] > gap_tolerance:
                 del consecutive_tracker[key]
+                del gap_seen[key]
 
     # ── Output ───────────────────────────────────────────────────────────────
     os.makedirs("output", exist_ok=True)
@@ -284,7 +316,7 @@ def run_detection(
     output_path = f"output/{video_name}_faults.json"
 
     output = {
-        "schema_version": 2,
+        "schema_version": 3,
         "video_path": os.path.abspath(video_path),
         "processed_at": datetime.now(timezone.utc).isoformat(),
         "calibration_file": os.path.abspath(config_path),
@@ -317,7 +349,7 @@ def run_detection(
             video_w=video_w,
             video_h=video_h,
             config=config,
-            H=H,
+            polygon=polygon,
             pose_data=pose_data,
             ball_detections=ball_detections,
             ball_states_per_frame=ball_states_per_frame,
@@ -337,7 +369,7 @@ def _write_debug_video(
     video_w: int,
     video_h: int,
     config: dict,
-    H: np.ndarray,
+    polygon: np.ndarray,
     pose_data: list[dict],
     ball_detections: list,
     ball_states_per_frame: list[dict],
@@ -365,7 +397,6 @@ def _write_debug_video(
         if not ret:
             break
 
-        # Update ball trail
         det = ball_detections[frame_idx] if frame_idx < len(ball_detections) else None
         if det is not None:
             ball_trail.append((int(det["x"]), int(det["y"])))
@@ -387,7 +418,7 @@ def _write_debug_video(
             ball_states=ball_states,
             bounce_events=bounce_events,
             fault_frame_set=fault_frame_set,
-            H=H,
+            polygon=polygon,
             fallback_mode=fallback_mode,
         )
         writer.write(annotated)
@@ -401,13 +432,42 @@ def main():
     parser = argparse.ArgumentParser(description="Detect kitchen faults in pickleball video")
     parser.add_argument("video", help="Path to video file")
     parser.add_argument("--calibration", required=True, help="Path to calibration JSON")
-    parser.add_argument("--pose-model", default="models/yolov8m-pose.pt", help="Path to pose model")
+    parser.add_argument("--pose-model", default="models/yolov8x-pose-p6.pt",
+                        help="Path to ultralytics pose model. Used when --pose-backend=ultralytics. "
+                             "COCO 17-kp models use ankle keypoints (WholeBody preferred for accuracy).")
+    parser.add_argument("--pose-backend", choices=["ultralytics", "wholebody"], default="wholebody",
+                        help="'wholebody' (default) = ultralytics person tracker + rtmlib RTMPose WholeBody "
+                             "(133 kp, true shoe-tip keypoints). "
+                             "'ultralytics' = single-model YOLO pose (COCO 17 kp, ankle-based zone check).")
+    parser.add_argument("--detector-model", default="models/yolov8s.pt",
+                        help="Person detector for --pose-backend=wholebody (auto-downloads via ultralytics into models/). "
+                             "Default models/yolov8s.pt is plenty for 2-4 large subjects on a static court; "
+                             "use models/yolov8x.pt only if you see missed detections.")
+    parser.add_argument("--wholebody-mode", choices=["performance", "balanced", "lightweight"],
+                        default="balanced",
+                        help="rtmlib pose tier. Default 'balanced' (DWPose-L @ 192x256). "
+                             "'performance' = DWPose-L @ 288x384 (slower, marginal accuracy gain). "
+                             "'lightweight' = RTMPose-M (fastest, for mobile or low-end CPU).")
     parser.add_argument("--ball-model", default=None, help="Path to ball detection model")
     parser.add_argument("--debug-video", default=None, metavar="PATH",
                         help="Write annotated debug video to PATH (e.g. output/debug.mp4)")
+    parser.add_argument("--imgsz", type=int, default=640,
+                        help="Detector inference image size (long edge). Lower = faster, less accurate. "
+                             "Affects ultralytics detector + ball model only; rtmlib pose has its own input size. Default 640.")
+    parser.add_argument("--ball-stride", type=int, default=2,
+                        help="Run ball detection every Nth frame; interpolate between. Default 2.")
+    parser.add_argument("--half", dest="half", action="store_true", default=None,
+                        help="Force fp16 inference. Default: auto (on when CUDA available).")
+    parser.add_argument("--no-half", dest="half", action="store_false",
+                        help="Force fp32 inference.")
     args = parser.parse_args()
 
-    run_detection(args.video, args.calibration, args.pose_model, args.ball_model, args.debug_video)
+    run_detection(
+        args.video, args.calibration, args.pose_model, args.ball_model, args.debug_video,
+        imgsz=args.imgsz, ball_stride=args.ball_stride, half=args.half,
+        pose_backend=args.pose_backend, detector_model_path=args.detector_model,
+        wholebody_mode=args.wholebody_mode,
+    )
 
 
 if __name__ == "__main__":

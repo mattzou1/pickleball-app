@@ -95,7 +95,7 @@ def correlate_fault(
     """Full fault correlation: check trigger, compute confidence, classify tier.
 
     Args:
-        zone_hit: dict from pose.check_player_in_kitchen with side, pixel, court_coord, etc.
+        zone_hit: dict from pose.check_player_in_kitchen with zone, pixel, etc.
         ball_state: current ball state for the relevant side.
         consecutive_frames: frames player has been in zone.
         ankle_conf: best ankle keypoint confidence.
@@ -119,8 +119,8 @@ def correlate_fault(
     return {
         "zone": zone_hit["zone"],
         "keypoint_side": zone_hit["keypoint_side"],
+        "foot_side": zone_hit.get("foot_side"),
         "pixel": zone_hit["pixel"],
-        "court_coord": zone_hit["court_coord"],
         "keypoint_confidence": zone_hit["conf"],
         "source": zone_hit["source"],
         "ankle_keypoint_confidence": ankle_conf,

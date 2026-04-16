@@ -22,11 +22,10 @@ import cv2
 import numpy as np
 
 from pickleball.pose import (
-    check_kitchen,
     extract_ankle_keypoints,
     extract_foot_keypoints,
     is_wholebody_model,
-    transform_to_court,
+    point_in_kitchen,
 )
 
 # ── Colors (BGR) ──────────────────────────────────────────────────────────────
@@ -34,8 +33,7 @@ COLOR_FOOT_SAFE = (0, 220, 0)        # green  — outside kitchen
 COLOR_FOOT_FAULT = (0, 0, 220)       # red    — inside kitchen
 COLOR_BALL = (0, 220, 220)           # yellow — ball dot
 COLOR_BALL_TRAIL = (0, 140, 140)     # dim yellow — trail
-COLOR_LEFT_ZONE = (0, 200, 0)        # green overlay — left kitchen
-COLOR_RIGHT_ZONE = (200, 80, 0)      # blue overlay  — right kitchen
+COLOR_KITCHEN_ZONE = (0, 200, 0)     # green overlay — combined kitchen
 COLOR_NET = (0, 220, 220)            # yellow — net line
 COLOR_FAULT_BORDER = (0, 0, 255)     # red — fault frame border
 COLOR_TEXT = (255, 255, 255)         # white text
@@ -104,64 +102,53 @@ def is_fault_frame(frame_idx: int, fault_frame_set: set[int]) -> bool:
 # ── OpenCV drawing ────────────────────────────────────────────────────────────
 
 def draw_kitchen_zones(frame: np.ndarray, config: dict) -> np.ndarray:
-    """Draw semi-transparent kitchen zone overlays using stored pixel_corners."""
-    overlay = frame.copy()
-    corners = config.get("pixel_corners", [])
-    if len(corners) < 8:
+    """Draw a semi-transparent overlay for the combined kitchen polygon."""
+    polygon = config.get("kitchen_polygon", [])
+    if len(polygon) < 3:
         return frame
 
-    left_pts = np.array(corners[:4], dtype=np.int32)
-    right_pts = np.array(corners[4:8], dtype=np.int32)
-
-    cv2.fillPoly(overlay, [left_pts], COLOR_LEFT_ZONE)
-    cv2.fillPoly(overlay, [right_pts], COLOR_RIGHT_ZONE)
-
+    pts = np.array(polygon, dtype=np.int32)
+    overlay = frame.copy()
+    cv2.fillPoly(overlay, [pts], COLOR_KITCHEN_ZONE)
     result = cv2.addWeighted(frame, 0.8, overlay, 0.2, 0)
-
-    # Draw zone outlines
-    cv2.polylines(result, [left_pts], True, COLOR_LEFT_ZONE, 2)
-    cv2.polylines(result, [right_pts], True, COLOR_RIGHT_ZONE, 2)
-
+    cv2.polylines(result, [pts], True, COLOR_KITCHEN_ZONE, 2)
     return result
 
 
 def draw_net_line(frame: np.ndarray, config: dict) -> np.ndarray:
-    """Draw the net line between the two net corner points."""
+    """Draw the net line.
+
+    If the calibration has `net_left_pixel` and `net_right_pixel`, draws a line
+    between them (captures the true tilt of the net in the image). Otherwise
+    falls back to a vertical line at `net_x_pixel`.
+    """
     left = config.get("net_left_pixel")
     right = config.get("net_right_pixel")
-
-    if left and right:
-        pt1 = (int(left[0]), int(left[1]))
-        pt2 = (int(right[0]), int(right[1]))
-        cv2.line(frame, pt1, pt2, COLOR_NET, 2)
-        cv2.circle(frame, pt1, 5, COLOR_NET, -1)
-        cv2.circle(frame, pt2, 5, COLOR_NET, -1)
-    elif config.get("net_x_pixel"):
-        # Fallback: old calibration with single net point
-        x = int(config["net_x_pixel"])
-        h = frame.shape[0]
-        cv2.line(frame, (x, 0), (x, h), COLOR_NET, 1)
-
+    if left is not None and right is not None:
+        cv2.line(frame, (int(left[0]), int(left[1])), (int(right[0]), int(right[1])), COLOR_NET, 2)
+        return frame
+    if config.get("net_x_pixel") is None:
+        return frame
+    x = int(config["net_x_pixel"])
+    h = frame.shape[0]
+    cv2.line(frame, (x, 0), (x, h), COLOR_NET, 1)
     return frame
 
 
 def draw_foot_keypoints(
     frame: np.ndarray,
     keypoints: np.ndarray,
-    H: np.ndarray,
+    polygon: np.ndarray,
 ) -> np.ndarray:
-    """Draw foot/ankle keypoint dots, colored by zone status."""
-    wholebody = is_wholebody_model(keypoints)
-
-    if wholebody:
+    """Draw foot/ankle keypoint dots, colored by whether they lie in the kitchen polygon."""
+    if is_wholebody_model(keypoints):
         kps = extract_foot_keypoints(keypoints)
     else:
         kps = extract_ankle_keypoints(keypoints)
 
     for kp in kps:
         px, py = int(kp["x"]), int(kp["y"])
-        court_x, court_y = transform_to_court((kp["x"], kp["y"]), H)
-        in_zone = check_kitchen(court_x, court_y) is not None
+        in_zone = point_in_kitchen(kp["x"], kp["y"], polygon)
         color = get_foot_keypoint_color(in_zone)
         cv2.circle(frame, (px, py), 8, color, -1)
         cv2.circle(frame, (px, py), 8, (255, 255, 255), 1)  # white outline
@@ -270,7 +257,7 @@ def annotate_frame(
     ball_states: dict,
     bounce_events: list[dict],
     fault_frame_set: set[int],
-    H: np.ndarray,
+    polygon: np.ndarray,
     fallback_mode: bool,
 ) -> np.ndarray:
     """Compose all annotations onto a single frame.
@@ -281,10 +268,10 @@ def annotate_frame(
         config: calibration config dict.
         pose_data_frame: {track_id: keypoints} for this frame.
         ball_trail: list of (x, y) pixel positions (newest last).
-        ball_states: {"near": state, "far": state} for this frame.
+        ball_states: {"left": state, "right": state} for this frame.
         bounce_events: list of {"frame": int, "side": str} dicts.
         fault_frame_set: set of frame numbers with faults.
-        H: homography matrix.
+        polygon: (N, 2) int32 array of kitchen polygon vertices.
         fallback_mode: True if ball model not running.
 
     Returns:
@@ -298,7 +285,7 @@ def annotate_frame(
 
     # Player keypoints + IDs
     for track_id, keypoints in pose_data_frame.items():
-        result = draw_foot_keypoints(result, keypoints, H)
+        result = draw_foot_keypoints(result, keypoints, polygon)
         result = draw_player_id(result, track_id, keypoints)
 
     # Ball trail

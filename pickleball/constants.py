@@ -1,37 +1,8 @@
 """Shared constants for the pickleball kitchen fault detector.
 
-All thresholds, zone bounds, keypoint indices, and frame tolerances live here.
+All thresholds, keypoint indices, and frame tolerances live here.
 Tuning is a one-file change.
 """
-
-# ── Court dimensions (feet) ──────────────────────────────────────────────────
-# Coordinate system: origin at left-side baseline corner
-# x-axis along baseline (0-20 ft), y-axis toward right-side baseline (0-27 ft)
-COURT_WIDTH_FT = 20.0
-COURT_LENGTH_FT = 27.0  # left baseline to right baseline (kitchen to kitchen)
-KITCHEN_DEPTH_FT = 7.0
-
-# Kitchen zone boundaries in court coordinates
-LEFT_KITCHEN_Y_MIN = 0.0
-LEFT_KITCHEN_Y_MAX = 7.0
-RIGHT_KITCHEN_Y_MIN = 20.0
-RIGHT_KITCHEN_Y_MAX = 27.0
-
-# World coordinates for the 8 calibration corners (feet)
-# Order: left kitchen (BL, BR, TR, TL), right kitchen (BL, BR, TR, TL)
-# "Bottom" = closer to left baseline, "Top" = closer to net
-WORLD_CORNERS = [
-    # Left kitchen
-    [0.0, 0.0],    # left baseline corner (left side)
-    [20.0, 0.0],   # left baseline corner (right side)
-    [20.0, 7.0],   # left kitchen line (right side)
-    [0.0, 7.0],    # left kitchen line (left side)
-    # Right kitchen
-    [0.0, 20.0],   # right kitchen line (left side)
-    [20.0, 20.0],  # right kitchen line (right side)
-    [20.0, 27.0],  # right baseline corner (right side)
-    [0.0, 27.0],   # right baseline corner (left side)
-]
 
 # ── Keypoint indices ─────────────────────────────────────────────────────────
 # COCO 17-keypoint (standard YOLOv8-pose)
@@ -56,19 +27,35 @@ FOOT_KP_CONF_THRESHOLD = 0.2
 # Ankle keypoints used for confidence scoring; higher threshold
 ANKLE_CONF_THRESHOLD = 0.5
 
-# ── Zone check: ankle buffer (when WholeBody foot keypoints unavailable) ─────
-# Ankle is ~3-4 inches above ground. Buffer expands zone to catch toe/heel.
-ANKLE_BUFFER_FT = 0.5
+# ── Zone detection ───────────────────────────────────────────────────────────
+# Outward tolerance for the kitchen-polygon hit test (pixels). A foot keypoint
+# outside the polygon by up to this many pixels still counts as inside.
+# Compensates for pose-keypoint pixel noise so a toe on or just outside the
+# kitchen line still registers as a fault. Pixel-based (not physical) — the
+# effective physical slack varies slightly with camera perspective, acceptable
+# given the camera is net-center.
+KITCHEN_BOUNDARY_TOLERANCE_PX = 5.0
 
 # ── Fault detection thresholds ───────────────────────────────────────────────
 # Minimum consecutive frames with foot in zone to trigger fault
 CONSECUTIVE_FRAMES_MIN = 3
 # Consecutive frames at which the consecutive component saturates in confidence
 CONSECUTIVE_FRAMES_SATURATE = 10
+# Tolerate this many consecutive inactive frames before resetting the consecutive
+# counter. Prevents single-frame tracker flickers/occlusions from erasing a
+# legitimate streak. FPS-scaled via scale_frame_threshold.
+CONSECUTIVE_GAP_TOLERANCE = 1
 
 # Confidence tiers (multiplicative formula)
 TIER_AUTO_FAULT = 0.5
 TIER_REVIEW_NEEDED = 0.15
+
+# ── Player selection ─────────────────────────────────────────────────────────
+# With the camera at net-center, the on-court players are the people closest
+# to the camera and therefore have the largest bboxes in pixel space. Keep the
+# N largest detections and drop everything else (adjacent-court players,
+# spectators). 4 covers singles + doubles.
+MAX_PLAYERS_KEPT = 4
 
 # ── Ball detection ───────────────────────────────────────────────────────────
 # Max frames to interpolate ball position across gaps

@@ -1,7 +1,8 @@
 """Ball detection, interpolation, bounce detection, and per-side state machine.
 
-Ball position is tracked in both pixel and court coordinates.
-Bounce detection uses court coordinates (feet/frame) to normalize perspective.
+Ball position is tracked in pixel space. Side (left/right of net) is derived
+from the ball's pixel x relative to `net_x_pixel` (net-center camera makes the
+threshold effective regardless of court perspective).
 """
 
 import numpy as np
@@ -63,16 +64,11 @@ def interpolate_positions(
 
         for j in range(gap_start, gap_end):
             t = (j - gap_start + 1) / (gap_len + 1)
-            interpolated = {
+            result[j] = {
                 "x": before["x"] + t * (after["x"] - before["x"]),
                 "y": before["y"] + t * (after["y"] - before["y"]),
                 "interpolated": True,
             }
-            # Carry over court coords if both anchors have them
-            if "court_x" in before and "court_x" in after:
-                interpolated["court_x"] = before["court_x"] + t * (after["court_x"] - before["court_x"])
-                interpolated["court_y"] = before["court_y"] + t * (after["court_y"] - before["court_y"])
-            result[j] = interpolated
 
     return result
 
@@ -81,10 +77,9 @@ def compute_vertical_velocity(
     detections: list[dict | None],
     window: int = BOUNCE_SMOOTHING_WINDOW,
 ) -> list[float | None]:
-    """Compute smoothed vertical velocity in court coordinates.
+    """Compute smoothed vertical velocity in pixel coordinates (pixels/frame).
 
-    Uses court_y if available (feet/frame), otherwise pixel y.
-    Positive velocity = moving toward far baseline (increasing y).
+    Positive velocity = y increasing (moving downward in image).
 
     Args:
         detections: list of ball detections (may contain None).
@@ -96,18 +91,10 @@ def compute_vertical_velocity(
     n = len(detections)
     raw_vel = [None] * n
 
-    y_key = "court_y"
-    # Check if court coords available
-    for d in detections:
-        if d is not None:
-            if y_key not in d:
-                y_key = "y"
-            break
-
-    # Raw velocity: difference between consecutive frames
+    # Raw velocity: difference between consecutive frames (pixel y)
     for i in range(1, n):
         if detections[i] is not None and detections[i - 1] is not None:
-            raw_vel[i] = detections[i][y_key] - detections[i - 1][y_key]
+            raw_vel[i] = detections[i]["y"] - detections[i - 1]["y"]
 
     # Smooth with moving average
     smoothed = [None] * n
@@ -126,22 +113,14 @@ def detect_bounces(
     detections: list[dict | None],
     velocities: list[float | None],
 ) -> list[int]:
-    """Detect bounce frames from velocity sign reversals.
+    """Detect bounce frames from pixel-y velocity sign reversals.
 
-    A bounce is a downward-to-upward reversal (velocity changes sign from
-    positive to negative or vice versa, indicating vertical direction change).
-
-    In court coordinates: bounce = ball moving toward ground then back up.
-    Since court_y increases toward far baseline, we detect sign changes in
-    the y-velocity derivative (acceleration) as a proxy.
-
-    Simplified: bounce = frame where velocity changes from positive to negative
-    (ball was going down, now going up). Requires at least 2 consecutive
-    non-None velocity readings on each side of the sign change.
+    A bounce is a vertical direction change — velocity sign flips between
+    consecutive frames. Requires non-None velocity on both sides.
 
     Args:
         detections: ball detections per frame.
-        velocities: smoothed vertical velocities.
+        velocities: smoothed pixel-y velocities.
 
     Returns:
         List of frame indices where bounces were detected.
@@ -169,30 +148,22 @@ def detect_bounces(
 def classify_bounce_side(
     frame_idx: int,
     detections: list[dict | None],
-    net_y_court: float = 13.5,
+    net_x_pixel: float,
 ) -> str | None:
-    """Determine which side of the court a bounce occurred on.
+    """Determine which side of the net a bounce occurred on (pixel space).
 
     Args:
         frame_idx: frame where bounce was detected.
-        detections: ball detections with court coordinates.
-        net_y_court: y-coordinate of the net in court coords (default: midpoint).
+        detections: ball detections (pixel coords).
+        net_x_pixel: x-pixel of the net center.
 
     Returns:
-        "left" if bounce on left side, "right" if on right side, None if unknown.
+        "left" if bounce on left side of net, "right" if on right, None if no detection.
     """
     det = detections[frame_idx]
     if det is None:
         return None
-
-    court_y = det.get("court_y")
-    if court_y is None:
-        return None
-
-    if court_y < net_y_court:
-        return "left"
-    else:
-        return "right"
+    return "left" if det["x"] < net_x_pixel else "right"
 
 
 class BallStateMachine:

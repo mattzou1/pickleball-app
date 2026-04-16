@@ -1,85 +1,54 @@
-"""Pose tracking, foot keypoint extraction, homography transform, and zone check.
+"""Pose keypoint extraction and pixel-space kitchen-zone check.
 
 Supports two model types:
 - WholeBody (133+ keypoints): uses 6 foot keypoints (toe + heel per foot) for zone check
-- COCO 17-keypoint: falls back to ankle keypoints + ANKLE_BUFFER_FT expansion
+- COCO 17-keypoint: falls back to ankle keypoints
+
+Zone detection is pure pixel-space: `point_in_kitchen` tests a foot pixel against
+the 4-corner kitchen polygon via `cv2.pointPolygonTest`. No homography is used.
 """
 
 import cv2
 import numpy as np
 
 from pickleball.constants import (
-    ANKLE_BUFFER_FT,
     ANKLE_CONF_THRESHOLD,
     COCO_LEFT_ANKLE,
     COCO_RIGHT_ANKLE,
-    LEFT_KITCHEN_Y_MAX,
-    LEFT_KITCHEN_Y_MIN,
     FOOT_KP_CONF_THRESHOLD,
-    RIGHT_KITCHEN_Y_MAX,
-    RIGHT_KITCHEN_Y_MIN,
+    KITCHEN_BOUNDARY_TOLERANCE_PX,
     WHOLEBODY_FOOT_INDICES,
-    WORLD_CORNERS,
 )
 
 
-def compute_homography(pixel_corners: list[list[float]]) -> np.ndarray:
-    """Compute homography from 8 pixel corners to court world coordinates.
+def point_in_kitchen(
+    x: float,
+    y: float,
+    polygon: np.ndarray,
+    tolerance_px: float = KITCHEN_BOUNDARY_TOLERANCE_PX,
+) -> bool:
+    """Test whether a pixel lies inside (or within `tolerance_px` of) the kitchen polygon.
+
+    Points up to `tolerance_px` outside the polygon still count as inside,
+    compensating for pose-keypoint pixel noise on near-line toe touches.
 
     Args:
-        pixel_corners: 8 pixel [x, y] points matching WORLD_CORNERS order.
+        x, y: pixel coordinates.
+        polygon: (N, 2) int32 array of polygon vertices in pixel space.
+        tolerance_px: outward slack in pixels. Defaults to
+            KITCHEN_BOUNDARY_TOLERANCE_PX. Pass 0.0 for strict-boundary behavior.
 
     Returns:
-        3x3 homography matrix.
+        True if the point is inside, on, or within `tolerance_px` of the polygon boundary.
     """
-    src = np.array(pixel_corners, dtype=np.float64)
-    dst = np.array(WORLD_CORNERS, dtype=np.float64)
-    H, status = cv2.findHomography(src, dst, cv2.RANSAC)
-    if H is None:
-        raise ValueError("Homography computation failed. Check corner points.")
-    return H
-
-
-def transform_to_court(pixel_point: tuple[float, float], H: np.ndarray) -> tuple[float, float]:
-    """Transform a pixel coordinate to court coordinates using homography.
-
-    Args:
-        pixel_point: (x, y) in pixels.
-        H: 3x3 homography matrix.
-
-    Returns:
-        (x_ft, y_ft) in court coordinates.
-    """
-    pt = np.array([[pixel_point[0], pixel_point[1]]], dtype=np.float64).reshape(-1, 1, 2)
-    transformed = cv2.perspectiveTransform(pt, H)
-    return float(transformed[0, 0, 0]), float(transformed[0, 0, 1])
-
-
-def check_kitchen(court_x: float, court_y: float, buffer: float = 0.0) -> str | None:
-    """Check if a court coordinate is inside a kitchen zone.
-
-    Args:
-        court_x: x position in feet (0-20).
-        court_y: y position in feet (0-27).
-        buffer: expand zone boundaries by this many feet (for ankle fallback).
-
-    Returns:
-        "left" if in left kitchen, "right" if in right kitchen, None if outside both.
-    """
-    if (LEFT_KITCHEN_Y_MIN - buffer) <= court_y <= (LEFT_KITCHEN_Y_MAX + buffer):
-        if -buffer <= court_x <= (20.0 + buffer):
-            return "left"
-    if (RIGHT_KITCHEN_Y_MIN - buffer) <= court_y <= (RIGHT_KITCHEN_Y_MAX + buffer):
-        if -buffer <= court_x <= (20.0 + buffer):
-            return "right"
-    return None
+    result = cv2.pointPolygonTest(polygon, (float(x), float(y)), True)
+    return result >= -tolerance_px
 
 
 def is_wholebody_model(keypoints: np.ndarray) -> bool:
     """Detect if model outputs WholeBody keypoints (133+) vs COCO 17."""
     if keypoints is None or len(keypoints.shape) < 1:
         return False
-    # keypoints shape: (num_keypoints, 2 or 3) for a single person
     num_kp = keypoints.shape[0] if len(keypoints.shape) == 2 else keypoints.shape[-2]
     return num_kp >= 23  # at minimum has foot keypoints (indices 17-22)
 
@@ -127,24 +96,27 @@ def extract_ankle_keypoints(keypoints: np.ndarray) -> list[dict]:
 
 def check_player_in_kitchen(
     keypoints: np.ndarray,
-    H: np.ndarray,
+    polygon: np.ndarray,
+    net_x_pixel: float | None = None,
 ) -> list[dict]:
-    """Check if any of a player's foot/ankle keypoints are in a kitchen zone.
+    """Check if any of a player's foot/ankle keypoints are inside the kitchen polygon.
 
     Auto-detects model type (WholeBody vs COCO 17) and uses appropriate keypoints.
-    WholeBody: foot keypoints with FOOT_KP_CONF_THRESHOLD for zone check.
-    COCO 17: ankle keypoints with ANKLE_BUFFER_FT zone expansion.
+    Zone test is pure pixel-space (`cv2.pointPolygonTest`), no homography.
 
     Args:
         keypoints: (num_keypoints, 3) array for one person.
-        H: 3x3 homography matrix.
+        polygon: (N, 2) int32 array of kitchen polygon vertices in pixel space.
+        net_x_pixel: x-pixel of the net center. When provided, each hit is tagged
+            with foot_side ("left"/"right") indicating which side of the net the
+            foot is on. Used downstream to pick the correct ball state.
 
     Returns:
         List of zone hits, each a dict with:
-            zone: "left" or "right" (kitchen zone)
+            zone: "kitchen" (single combined zone)
             keypoint_side: "left" or "right" (body side — which foot)
+            foot_side: "left" or "right" (court-side based on net_x_pixel, or None)
             pixel: (x, y)
-            court_coord: (x_ft, y_ft)
             conf: keypoint confidence
             source: "foot" or "ankle"
     """
@@ -152,33 +124,26 @@ def check_player_in_kitchen(
     wholebody = is_wholebody_model(keypoints)
 
     if wholebody:
-        foot_kps = extract_foot_keypoints(keypoints)
-        for kp in foot_kps:
-            court_x, court_y = transform_to_court((kp["x"], kp["y"]), H)
-            zone = check_kitchen(court_x, court_y, buffer=0.0)
-            if zone:
-                hits.append({
-                    "zone": zone,
-                    "keypoint_side": kp["side"],
-                    "pixel": (kp["x"], kp["y"]),
-                    "court_coord": (court_x, court_y),
-                    "conf": kp["conf"],
-                    "source": "foot",
-                })
+        kps = extract_foot_keypoints(keypoints)
+        source = "foot"
     else:
-        ankle_kps = extract_ankle_keypoints(keypoints)
-        for kp in ankle_kps:
-            court_x, court_y = transform_to_court((kp["x"], kp["y"]), H)
-            zone = check_kitchen(court_x, court_y, buffer=ANKLE_BUFFER_FT)
-            if zone:
-                hits.append({
-                    "zone": zone,
-                    "keypoint_side": kp["side"],
-                    "pixel": (kp["x"], kp["y"]),
-                    "court_coord": (court_x, court_y),
-                    "conf": kp["conf"],
-                    "source": "ankle",
-                })
+        kps = extract_ankle_keypoints(keypoints)
+        source = "ankle"
+
+    for kp in kps:
+        if not point_in_kitchen(kp["x"], kp["y"], polygon):
+            continue
+        foot_side = None
+        if net_x_pixel is not None:
+            foot_side = "left" if kp["x"] < net_x_pixel else "right"
+        hits.append({
+            "zone": "kitchen",
+            "keypoint_side": kp["side"],
+            "foot_side": foot_side,
+            "pixel": (kp["x"], kp["y"]),
+            "conf": kp["conf"],
+            "source": source,
+        })
 
     return hits
 
@@ -203,3 +168,33 @@ def get_ankle_confidence(keypoints: np.ndarray) -> float:
         if conf >= ANKLE_CONF_THRESHOLD and conf > best:
             best = conf
     return best
+
+
+def get_pose_confidence(keypoints: np.ndarray) -> float:
+    """Best available keypoint confidence for composite scoring.
+
+    Prefers ankle conf if ≥ ANKLE_CONF_THRESHOLD. For WholeBody output,
+    falls back to the best foot-keypoint conf ≥ FOOT_KP_CONF_THRESHOLD when
+    the ankle is occluded/low-confidence. This prevents silent drops of
+    valid faults in WholeBody mode where foot keypoints are reliable but
+    the ankle isn't (composite × 0 → FILTERED).
+
+    Args:
+        keypoints: (num_keypoints, 3) array for one person.
+
+    Returns:
+        Best confidence (0.0 if nothing reliable).
+    """
+    ankle_conf = get_ankle_confidence(keypoints)
+    if ankle_conf > 0.0:
+        return ankle_conf
+    if is_wholebody_model(keypoints):
+        best = 0.0
+        for idx in WHOLEBODY_FOOT_INDICES:
+            if idx >= keypoints.shape[0]:
+                continue
+            conf = float(keypoints[idx, 2])
+            if conf >= FOOT_KP_CONF_THRESHOLD and conf > best:
+                best = conf
+        return best
+    return 0.0
