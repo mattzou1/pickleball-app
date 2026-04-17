@@ -1,6 +1,5 @@
 .venv/
 .pytest_cache/
-.claude/
 __pycache__/
 **/__pycache__/
 models/
@@ -8,3 +7,5 @@ inputs/
 output/
 configs/
 TODOS.md
+training/dataset/
+training/runs/
