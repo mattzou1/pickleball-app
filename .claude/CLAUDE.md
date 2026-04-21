@@ -59,6 +59,7 @@ python review.py <faults.json> [--video <path>]
 
 ## Code conventions
 
+- All model weights must be stored in `models/`. This applies to ultralytics weights, ball detection models, and any other model files — never reference or download models to another directory.
 - All tunable constants live in `pickleball/constants.py`. Tuning is a one-file change.
 - Everything is pixel-space — no court coordinates, no homography. The kitchen polygon, net position, ball tracking, and bounce detection all operate on pixel coordinates from the input frame.
 - Calibration JSON (schema_version 3) fields: `kitchen_polygon` (4 pixel-space `[x, y]` points, convex quad enclosing both kitchens), `net_left_pixel`, `net_right_pixel`, `net_x_pixel` (midpoint, used for ball-side classification), `input_resolution` (`[w, h]`, checked against the video at detect time).

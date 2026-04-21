@@ -17,8 +17,8 @@ import os
 import site
 from pathlib import Path
 
-# Order matters: load lower-level libs (cudart, nvrtc) before dependents.
-_LIBS = [
+# cu12 libs (for onnxruntime-gpu). Order matters: lower-level first.
+_LIBS_CU12 = [
     ("cuda_runtime/lib", "libcudart.so.12"),
     ("cuda_nvrtc/lib", "libnvrtc.so.12"),
     ("nvjitlink/lib", "libnvJitLink.so.12"),
@@ -27,6 +27,12 @@ _LIBS = [
     ("cufft/lib", "libcufft.so.11"),
     ("curand/lib", "libcurand.so.10"),
     ("cudnn/lib", "libcudnn.so.9"),
+]
+
+# cu13 libs (for torch CUDA 13 — libnvrtc-builtins must load before torch JIT).
+_LIBS_CU13 = [
+    ("cu13/lib", "libnvrtc-builtins.so.13.0"),
+    ("cu13/lib", "libnvrtc.so.13"),
 ]
 
 
@@ -38,7 +44,7 @@ def preload() -> None:
     else:
         return
 
-    for subdir, soname in _LIBS:
+    for subdir, soname in _LIBS_CU13 + _LIBS_CU12:
         so = nvidia_root / subdir / soname
         if so.is_file():
             try:
