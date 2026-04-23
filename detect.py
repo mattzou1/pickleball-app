@@ -27,14 +27,18 @@ from pickleball.ball import (
     UNKNOWN,
     BallStateMachine,
     classify_bounce_side,
+    compute_velocity_vectors,
     compute_vertical_velocity,
     detect_bounces,
+    detect_paddle_contacts,
     interpolate_positions,
+    paddle_contact_near,
 )
 from pickleball.constants import (
     BALL_UNKNOWN_GAP_FRAMES,
     CONSECUTIVE_FRAMES_MIN,
     CONSECUTIVE_GAP_TOLERANCE,
+    PADDLE_CONTACT_WINDOW_FRAMES,
     scale_frame_threshold,
 )
 from pickleball.fault import correlate_fault
@@ -204,6 +208,18 @@ def run_detection(
     detection_rate = detected_count / max(total_frames, 1)
     fallback_mode = ball_model is None or detection_rate < 0.4
 
+    # Paddle-contact detection: skip in fallback mode (trajectory too sparse).
+    paddle_contacts: list[dict] = []
+    if not fallback_mode:
+        velocity_vectors = compute_velocity_vectors(ball_detections)
+        paddle_contacts = detect_paddle_contacts(
+            detections=ball_detections,
+            velocities_xy=velocity_vectors,
+            pose_data=pose_data,
+            bounce_frames=bounce_frames,
+        )
+    paddle_window = scale_frame_threshold(PADDLE_CONTACT_WINDOW_FRAMES, fps)
+
     if fallback_mode and ball_model is not None:
         print(f"Warning: ball detection rate {detection_rate:.1%} < 40%. Using fallback mode.")
         print("All kitchen entries will be REVIEW_NEEDED.")
@@ -277,6 +293,16 @@ def run_detection(
                 elif ball_state == UNKNOWN:
                     ball_conf = 1.0
 
+            # Co-occurring paddle contact by this same player (if any).
+            contact = None
+            if not fallback_mode and ball_state == LIVE:
+                contact = paddle_contact_near(
+                    paddle_contacts,
+                    frame_idx=frame_idx,
+                    window_frames=paddle_window,
+                    track_id=track_id,
+                )
+
             # Emit one fault per hit this frame (one per foot keypoint that's inside).
             for hit in hits:
                 result = correlate_fault(
@@ -286,6 +312,7 @@ def run_detection(
                     ankle_conf=pose_conf,
                     ball_conf=ball_conf,
                     min_consecutive=min_consecutive,
+                    paddle_contact=contact,
                 )
 
                 if result is not None:
@@ -356,6 +383,7 @@ def run_detection(
             bounce_events=bounce_events,
             fault_frame_set=fault_frame_set,
             fallback_mode=fallback_mode,
+            paddle_contacts=paddle_contacts,
         )
 
     return output_path
@@ -376,6 +404,7 @@ def _write_debug_video(
     bounce_events: list[dict],
     fault_frame_set: set[int],
     fallback_mode: bool,
+    paddle_contacts: list[dict] | None = None,
 ) -> None:
     """Write annotated debug video. Called after all detection passes complete."""
     os.makedirs(os.path.dirname(debug_video_path) if os.path.dirname(debug_video_path) else ".", exist_ok=True)
@@ -420,6 +449,7 @@ def _write_debug_video(
             fault_frame_set=fault_frame_set,
             polygon=polygon,
             fallback_mode=fallback_mode,
+            paddle_contacts=paddle_contacts,
         )
         writer.write(annotated)
 

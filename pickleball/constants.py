@@ -8,6 +8,9 @@ Tuning is a one-file change.
 # COCO 17-keypoint (standard YOLOv8-pose)
 COCO_LEFT_ANKLE = 15
 COCO_RIGHT_ANKLE = 16
+# Wrists share the same indices in COCO 17 and COCO-WholeBody body block.
+COCO_LEFT_WRIST = 9
+COCO_RIGHT_WRIST = 10
 
 # COCO-WholeBody foot keypoints (indices 17-22)
 # Available when using a WholeBody model (ViTPose, RTMPose-WholeBody)
@@ -64,6 +67,37 @@ BALL_INTERPOLATION_MAX_GAP = 5
 BALL_UNKNOWN_GAP_FRAMES = 10
 # Moving average window for bounce velocity smoothing (frames at 30fps base)
 BOUNCE_SMOOTHING_WINDOW = 3
+
+# ── Paddle-contact detection ─────────────────────────────────────────────────
+# Trajectory inflection (ball velocity vector changes sharply) co-located with
+# a player's wrist keypoint. Used to pin the *instant* of paddle-ball contact
+# so kitchen entries can be tiered as true volleys vs. loitering.
+#
+# An inflection fires if the velocity direction changes by more than
+# PADDLE_CONTACT_ANGLE_THRESHOLD_DEG OR the speed ratio exceeds
+# PADDLE_CONTACT_SPEED_RATIO (ratio is max(|v_i|,|v_{i-1}|) / min(...)).
+PADDLE_CONTACT_ANGLE_THRESHOLD_DEG = 35.0
+PADDLE_CONTACT_SPEED_RATIO = 1.8
+# Minimum horizontal speed (pixels/frame) on BOTH sides of the contact.
+# A true paddle hit reverses horizontal direction — both pre- and post-contact
+# must carry meaningful horizontal motion. Floor bounces (pure vertical flip)
+# and ball pickups (near-stationary ball) fail this gate.
+PADDLE_CONTACT_MIN_HORIZONTAL_SPEED_PX = 2.0
+# Max pixel distance from ball center to wrist to associate the inflection
+# with a player. The ball is at the paddle face at contact, not the wrist,
+# so this needs to be generous enough to cover paddle length + arm extension.
+PADDLE_CONTACT_DISTANCE_PX = 150.0
+# Minimum wrist keypoint confidence to consider it a valid candidate.
+PADDLE_CONTACT_WRIST_CONF_THRESHOLD = 0.3
+# Window (in frames at 30fps base, fps-scaled) around a kitchen-entry frame
+# in which a paddle-contact event is considered "co-occurring" with the entry.
+PADDLE_CONTACT_WINDOW_FRAMES = 5
+# Confidence multiplier applied to composite when a paddle contact by the same
+# track_id co-occurs with a LIVE kitchen entry (capped at 1.0).
+PADDLE_CONTACT_CONFIDENCE_BOOST = 1.35
+# Confidence multiplier applied when no paddle contact co-occurs with a LIVE
+# kitchen entry — demotes ambiguous "standing in kitchen" cases.
+PADDLE_CONTACT_MISSING_PENALTY = 0.6
 
 # ── FPS ──────────────────────────────────────────────────────────────────────
 BASE_FPS = 30.0

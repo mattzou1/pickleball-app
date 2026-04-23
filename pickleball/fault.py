@@ -13,6 +13,8 @@ from pickleball.ball import BOUNCED, LIVE, UNKNOWN
 from pickleball.constants import (
     CONSECUTIVE_FRAMES_MIN,
     CONSECUTIVE_FRAMES_SATURATE,
+    PADDLE_CONTACT_CONFIDENCE_BOOST,
+    PADDLE_CONTACT_MISSING_PENALTY,
     TIER_AUTO_FAULT,
     TIER_REVIEW_NEEDED,
 )
@@ -91,6 +93,7 @@ def correlate_fault(
     ankle_conf: float,
     ball_conf: float,
     min_consecutive: int = CONSECUTIVE_FRAMES_MIN,
+    paddle_contact: dict | None = None,
 ) -> dict | None:
     """Full fault correlation: check trigger, compute confidence, classify tier.
 
@@ -101,6 +104,12 @@ def correlate_fault(
         ankle_conf: best ankle keypoint confidence.
         ball_conf: ball detection confidence (0.0 if UNKNOWN).
         min_consecutive: minimum frames threshold (fps-scaled).
+        paddle_contact: optional paddle-contact event (from
+            `ball.paddle_contact_near`) co-occurring with this kitchen entry.
+            When present and ball_state == LIVE, boosts composite confidence
+            and marks the fault as a confirmed volley. When explicitly absent
+            (None) on a LIVE entry, applies a penalty so ambiguous
+            standing-in-kitchen cases don't auto-fault.
 
     Returns:
         Fault dict if triggered and not FILTERED, None otherwise.
@@ -111,6 +120,17 @@ def correlate_fault(
         return None
 
     confidence = compute_confidence(ankle_conf, consecutive_frames, ball_conf)
+
+    # Paddle-contact only informs LIVE-state kitchen entries (the volley
+    # question). BOUNCED is already filtered above; UNKNOWN is a separate
+    # review tier and we don't want to demote it further.
+    if ball_state == LIVE:
+        if paddle_contact is not None:
+            confidence = min(1.0, confidence * PADDLE_CONTACT_CONFIDENCE_BOOST)
+            reason = "volley_confirmed"
+        else:
+            confidence = confidence * PADDLE_CONTACT_MISSING_PENALTY
+
     tier = classify_tier(confidence)
 
     if tier == "FILTERED":
@@ -130,4 +150,5 @@ def correlate_fault(
         "composite_confidence": round(confidence, 4),
         "confidence_tier": tier,
         "fault_reason": reason,
+        "paddle_contact": paddle_contact,
     }

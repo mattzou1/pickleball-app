@@ -36,10 +36,12 @@ COLOR_BALL_TRAIL = (0, 140, 140)     # dim yellow — trail
 COLOR_KITCHEN_ZONE = (0, 200, 0)     # green overlay — combined kitchen
 COLOR_NET = (0, 220, 220)            # yellow — net line
 COLOR_FAULT_BORDER = (0, 0, 255)     # red — fault frame border
+COLOR_PADDLE_CONTACT = (255, 0, 255) # magenta — paddle contact marker
 COLOR_TEXT = (255, 255, 255)         # white text
 COLOR_TEXT_BG = (0, 0, 0)           # black text background
 
 BOUNCE_FLASH_WINDOW = 15            # frames to show bounce flash text
+PADDLE_FLASH_WINDOW = 10            # frames to keep paddle-contact marker visible
 BALL_TRAIL_LEN = 10                 # frames to show in ball trail
 
 
@@ -92,6 +94,31 @@ def get_bounce_flash(
         side = best.get("side") or "?"
         return f"BOUNCE: {side.upper()}"
     return None
+
+
+def get_recent_paddle_contact(
+    frame_idx: int,
+    paddle_contacts: list[dict],
+    window: int = PADDLE_FLASH_WINDOW,
+) -> dict | None:
+    """Return the most recent paddle-contact event within `window` frames.
+
+    Args:
+        frame_idx: current frame number.
+        paddle_contacts: list of contact dicts (as emitted by
+            `ball.detect_paddle_contacts`).
+        window: frames to keep the marker visible.
+
+    Returns:
+        The contact dict or None.
+    """
+    best = None
+    for c in paddle_contacts:
+        frames_since = frame_idx - c["frame"]
+        if 0 <= frames_since <= window:
+            if best is None or c["frame"] > best["frame"]:
+                best = c
+    return best
 
 
 def is_fault_frame(frame_idx: int, fault_frame_set: set[int]) -> bool:
@@ -215,6 +242,46 @@ def draw_bounce_flash(frame: np.ndarray, bounce_text: str) -> np.ndarray:
     return frame
 
 
+def draw_paddle_contact(
+    frame: np.ndarray,
+    contact: dict,
+    frame_idx: int,
+    window: int = PADDLE_FLASH_WINDOW,
+) -> np.ndarray:
+    """Draw a paddle-contact marker: ring at ball, line to wrist, label.
+
+    Fades the marker over the visibility window.
+    """
+    frames_since = frame_idx - contact["frame"]
+    if frames_since < 0 or frames_since > window:
+        return frame
+
+    # Fade: strongest on the contact frame, linearly down to ~0.3 at the edge.
+    alpha = 1.0 - 0.7 * (frames_since / max(window, 1))
+    radius = int(20 + frames_since * 2)  # expanding ring
+    thickness = max(1, int(3 * alpha))
+
+    bx, by = int(contact["ball_xy"][0]), int(contact["ball_xy"][1])
+    wx, wy = int(contact["wrist_xy"][0]), int(contact["wrist_xy"][1])
+
+    # Expanding ring at the ball
+    cv2.circle(frame, (bx, by), radius, COLOR_PADDLE_CONTACT, thickness)
+    # Solid dot at exact contact frame only
+    if frames_since == 0:
+        cv2.circle(frame, (bx, by), 6, COLOR_PADDLE_CONTACT, -1)
+        cv2.line(frame, (bx, by), (wx, wy), COLOR_PADDLE_CONTACT, 2)
+        cv2.circle(frame, (wx, wy), 6, COLOR_PADDLE_CONTACT, -1)
+
+    label = f"PADDLE P{contact['track_id']} ({contact['wrist_side']})"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.6
+    thick = 2
+    tx, ty = bx + radius + 6, by
+    cv2.putText(frame, label, (tx + 1, ty + 1), font, scale, (0, 0, 0), thick + 1)
+    cv2.putText(frame, label, (tx, ty), font, scale, COLOR_PADDLE_CONTACT, thick)
+    return frame
+
+
 def draw_fault_border(frame: np.ndarray) -> np.ndarray:
     """Draw a red border around the frame to indicate active fault."""
     h, w = frame.shape[:2]
@@ -259,6 +326,7 @@ def annotate_frame(
     fault_frame_set: set[int],
     polygon: np.ndarray,
     fallback_mode: bool,
+    paddle_contacts: list[dict] | None = None,
 ) -> np.ndarray:
     """Compose all annotations onto a single frame.
 
@@ -305,6 +373,12 @@ def annotate_frame(
     bounce_text = get_bounce_flash(frame_idx, bounce_events)
     if bounce_text:
         result = draw_bounce_flash(result, bounce_text)
+
+    # Paddle contact marker (drawn after ball so it sits on top)
+    if paddle_contacts:
+        contact = get_recent_paddle_contact(frame_idx, paddle_contacts)
+        if contact is not None:
+            result = draw_paddle_contact(result, contact, frame_idx)
 
     # Frame counter (bottom-right)
     h, w = result.shape[:2]

@@ -94,7 +94,7 @@ def draw_fault_overlay(
     lines = [
         f"Fault {fault_idx + 1}/{total_faults}",
         f"Frame: {fault['frame_number']} ({fault['timestamp_seconds']:.2f}s)",
-        f"Player: #{fault['player_track_id']} | Side: {fault['side']}",
+        f"Player: #{fault['player_track_id']} | Side: {fault['keypoint_side']}",
         f"Tier: {fault['confidence_tier']}",
         f"Confidence: {fault['composite_confidence']:.3f}",
         f"Ball: {fault['ball_state']} | Consec: {fault['consecutive_frames_in_zone']}",

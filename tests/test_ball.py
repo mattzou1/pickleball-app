@@ -1,5 +1,6 @@
 """Tests for pickleball.ball module."""
 
+import numpy as np
 import pytest
 
 from pickleball.ball import (
@@ -8,9 +9,12 @@ from pickleball.ball import (
     UNKNOWN,
     BallStateMachine,
     classify_bounce_side,
+    compute_velocity_vectors,
     compute_vertical_velocity,
     detect_bounces,
+    detect_paddle_contacts,
     interpolate_positions,
+    paddle_contact_near,
 )
 
 
@@ -187,3 +191,133 @@ def test_state_net_crossing_via_detection():
     sm.update_detection(True, ball_side="right")
     sm.update_detection(True, ball_side="left")  # triggers net crossing
     assert sm.get_state("left") == LIVE
+
+
+# ── Paddle-contact detection tests ──────────────────────────────────────────
+# COCO 17: wrists at indices 9 (left) and 10 (right). Each keypoint row is
+# [x, y, confidence].
+
+def _kps_with_wrists(left_xy, right_xy, left_conf=0.9, right_conf=0.9, size=17):
+    arr = np.zeros((size, 3), dtype=float)
+    arr[9] = [left_xy[0], left_xy[1], left_conf]
+    arr[10] = [right_xy[0], right_xy[1], right_conf]
+    return arr
+
+
+def test_paddle_contact_straight_line_no_contact():
+    """Ball moving at constant velocity with no inflection -> no contact."""
+    dets = [{"x": float(i * 10), "y": 100.0} for i in range(10)]
+    vels = compute_velocity_vectors(dets)
+    pose = [{1: _kps_with_wrists((i * 10, 100), (i * 10 + 5, 100))} for i in range(10)]
+    contacts = detect_paddle_contacts(dets, vels, pose, bounce_frames=[])
+    assert contacts == []
+
+
+def test_paddle_contact_sharp_reversal_near_wrist():
+    """Sharp direction reversal co-located with wrist -> one contact."""
+    # Ball flies right frames 0-4, reverses starting at frame 5.
+    # Inflection is detected at frame 5 (first frame where velocity flips).
+    dets = [
+        {"x": 100.0, "y": 200.0},
+        {"x": 120.0, "y": 200.0},
+        {"x": 140.0, "y": 200.0},
+        {"x": 160.0, "y": 200.0},
+        {"x": 180.0, "y": 200.0},
+        {"x": 160.0, "y": 200.0},  # reversal
+        {"x": 140.0, "y": 200.0},
+        {"x": 120.0, "y": 200.0},
+        {"x": 100.0, "y": 200.0},
+    ]
+
+    vels = compute_velocity_vectors(dets, window=1)
+
+    # Wrist of track 7 sits on the ball at frame 5.
+    pose = []
+    for i in range(len(dets)):
+        if i == 5:
+            pose.append({7: _kps_with_wrists((1000, 1000), (160, 200))})
+        else:
+            pose.append({7: _kps_with_wrists((1000, 1000), (1000, 1000))})
+
+    contacts = detect_paddle_contacts(dets, vels, pose, bounce_frames=[])
+    assert len(contacts) == 1
+    c = contacts[0]
+    assert c["frame"] == 5
+    assert c["track_id"] == 7
+    assert c["wrist_side"] == "right"
+    assert c["distance_px"] == pytest.approx(0.0, abs=1.0)
+
+
+def _reversal_trajectory():
+    return [
+        {"x": 100.0, "y": 200.0},
+        {"x": 120.0, "y": 200.0},
+        {"x": 140.0, "y": 200.0},
+        {"x": 160.0, "y": 200.0},
+        {"x": 180.0, "y": 200.0},
+        {"x": 160.0, "y": 200.0},
+        {"x": 140.0, "y": 200.0},
+        {"x": 120.0, "y": 200.0},
+        {"x": 100.0, "y": 200.0},
+    ]
+
+
+def test_paddle_contact_wrist_too_far():
+    """Inflection with no wrist within radius -> no contact."""
+    dets = _reversal_trajectory()
+    vels = compute_velocity_vectors(dets, window=1)
+    pose = [{7: _kps_with_wrists((2000, 2000), (2000, 2000))} for _ in dets]
+    contacts = detect_paddle_contacts(dets, vels, pose, bounce_frames=[])
+    assert contacts == []
+
+
+def test_paddle_contact_suppressed_by_bounce():
+    """Inflection within ±1 of a bounce frame is ignored."""
+    dets = _reversal_trajectory()
+    vels = compute_velocity_vectors(dets, window=1)
+    pose = []
+    for i in range(len(dets)):
+        if i == 5:
+            pose.append({7: _kps_with_wrists((1000, 1000), (160, 200))})
+        else:
+            pose.append({7: _kps_with_wrists((1000, 1000), (1000, 1000))})
+
+    # Pretend a bounce was detected at frame 5.
+    contacts = detect_paddle_contacts(dets, vels, pose, bounce_frames=[5])
+    assert contacts == []
+
+
+def test_paddle_contact_near_window():
+    """paddle_contact_near picks closest in-window contact, optional track filter."""
+    contacts = [
+        {"frame": 10, "track_id": 1, "wrist_side": "left"},
+        {"frame": 20, "track_id": 2, "wrist_side": "right"},
+        {"frame": 22, "track_id": 1, "wrist_side": "right"},
+    ]
+    # Nearest to 21 within window=3: frame 20 or 22 (both dist 1). Picks 20 (first match).
+    r = paddle_contact_near(contacts, frame_idx=21, window_frames=3)
+    assert r is not None and r["frame"] in (20, 22)
+
+    # Filter by track_id=1 -> frame 22 is closest.
+    r = paddle_contact_near(contacts, frame_idx=21, window_frames=3, track_id=1)
+    assert r is not None and r["frame"] == 22
+
+    # Out of window -> None.
+    r = paddle_contact_near(contacts, frame_idx=50, window_frames=3)
+    assert r is None
+
+
+def test_paddle_contact_low_wrist_conf_ignored():
+    """Wrist below confidence threshold -> no association."""
+    dets = _reversal_trajectory()
+    vels = compute_velocity_vectors(dets, window=1)
+    pose = []
+    for i in range(len(dets)):
+        if i == 5:
+            # wrist at ball but conf=0.1 (< threshold 0.3)
+            pose.append({7: _kps_with_wrists((1000, 1000), (160, 200), right_conf=0.1)})
+        else:
+            pose.append({7: _kps_with_wrists((1000, 1000), (1000, 1000))})
+
+    contacts = detect_paddle_contacts(dets, vels, pose, bounce_frames=[])
+    assert contacts == []
